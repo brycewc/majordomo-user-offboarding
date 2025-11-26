@@ -99,7 +99,7 @@
             "displayName": "userIds",
             "entitySubType": null,
             "flag": "input",
-            "id": "URfsJHMCezUjSvt",
+            "id": "FfOHtuxjFVZiqhJ",
             "isList": true,
             "mappedTo": "CyXpbZKfoFawciT",
             "paramName": "userIds",
@@ -111,7 +111,7 @@
         "output": [],
         "taskType": "nebulaFunction",
         "metadata": {
-          "version": "1.0.46",
+          "version": "1.0.47",
           "settings": {},
           "packageId": "d5c46aaa-963f-4e01-a84a-f89ccea6465a",
           "functionName": "deleteUsersSessions"
@@ -361,7 +361,7 @@
             "displayName": "newOwnerId",
             "entitySubType": null,
             "flag": "input",
-            "id": "kHRIdRSKeAYUDbH",
+            "id": "oigFOBwQxvWPhpF",
             "isList": false,
             "mappedTo": "qUBuYSFeMGeSgHP",
             "paramName": "newOwnerId",
@@ -379,7 +379,7 @@
                 "displayName": "id",
                 "entitySubType": null,
                 "flag": "input",
-                "id": "jIjFYkldDSaDlHq.AtTVCqpMghaoblt",
+                "id": "czmnHSuvynmamNs.zKeuVYPBITfSefp",
                 "isList": false,
                 "mappedTo": null,
                 "paramName": "id",
@@ -395,7 +395,7 @@
                 "displayName": "type",
                 "entitySubType": null,
                 "flag": "input",
-                "id": "jIjFYkldDSaDlHq.ZnzpLDIZjWBzKMO",
+                "id": "czmnHSuvynmamNs.jGfOsxYjIFNSUTh",
                 "isList": false,
                 "mappedTo": null,
                 "paramName": "type",
@@ -410,7 +410,7 @@
             "displayName": "objectsToTransfer",
             "entitySubType": null,
             "flag": "input",
-            "id": "jIjFYkldDSaDlHq",
+            "id": "czmnHSuvynmamNs",
             "isList": true,
             "mappedTo": null,
             "paramName": "objectsToTransfer",
@@ -426,7 +426,7 @@
             "displayName": "userId",
             "entitySubType": null,
             "flag": "input",
-            "id": "XDOKJEAUzalBqZP",
+            "id": "PbUtCwirRpblBjX",
             "isList": false,
             "mappedTo": "iEpYJABHzIWrSKb",
             "paramName": "userId",
@@ -438,7 +438,7 @@
         "output": [],
         "taskType": "nebulaFunction",
         "metadata": {
-          "version": "1.0.46",
+          "version": "1.0.47",
           "settings": {},
           "packageId": "d5c46aaa-963f-4e01-a84a-f89ccea6465a",
           "functionName": "transferContent"
@@ -447,7 +447,7 @@
         "selectedTaskDescription": ""
       },
       "style": {
-        "zIndex": 4,
+        "zIndex": 3,
         "outline": "none"
       },
       "index": 3,
@@ -476,7 +476,7 @@
             "displayName": "userId",
             "entitySubType": null,
             "flag": "input",
-            "id": "IrliNPigwALsgvc",
+            "id": "GwCKDKOawsbfSPE",
             "isList": false,
             "mappedTo": "iEpYJABHzIWrSKb",
             "paramName": "userId",
@@ -488,7 +488,7 @@
         "output": [],
         "taskType": "nebulaFunction",
         "metadata": {
-          "version": "1.0.46",
+          "version": "1.0.47",
           "settings": {},
           "packageId": "d5c46aaa-963f-4e01-a84a-f89ccea6465a",
           "functionName": "deleteUser"
@@ -976,7 +976,7 @@
       "id": "cZJBMtGxclrQUSW",
       "position": {
         "x": 1510,
-        "y": 1110
+        "y": 990
       },
       "data": {
         "dimensions": {
@@ -1185,7 +1185,7 @@
         "selectedTaskDescription": "Send a stylized email to a person entity"
       },
       "style": {
-        "zIndex": 4,
+        "zIndex": 3,
         "outline": "none"
       },
       "index": 12,
@@ -2952,7 +2952,7 @@
           ],
           [
             1610,
-            1171
+            1051
           ]
         ],
         "entryPosition": "left",
@@ -3043,7 +3043,7 @@
         "title": ""
       },
       "style": {
-        "zIndex": 4
+        "zIndex": 5
       },
       "index": 29,
       "arrowHeadType": "arrow",
@@ -3147,7 +3147,7 @@
         "title": ""
       },
       "style": {
-        "zIndex": 4
+        "zIndex": 5
       },
       "index": 33,
       "arrowHeadType": "arrow",
@@ -3288,15 +3288,11 @@
       "source": "cZJBMtGxclrQUSW",
       "target": "SWQjxxDeaEMJDCx",
       "data": {
-        "sourcePosition": "top",
+        "sourcePosition": "left",
         "targetPosition": "right",
         "path": [
           [
-            1610,
-            1110
-          ],
-          [
-            1610,
+            1510,
             1020
           ],
           [

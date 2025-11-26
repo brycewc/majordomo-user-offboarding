@@ -180,6 +180,11 @@ async function logTransfers(
 async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 	let currentPeriodId = await getCurrentPeriod();
 
+	// Handle null or undefined by converting to empty array
+	if (!objectsToTransfer) {
+		objectsToTransfer = [];
+	}
+
 	// Parse objects by type if specific objects are provided
 	const objectsByType = {};
 	if (objectsToTransfer.length > 0) {
@@ -275,11 +280,11 @@ async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 		transferRepositories(userId, newOwnerId, objectsByType['REPOSITORY'] || []),
 
 		...(objectsToTransfer.length === 0
-			? transferApprovals(userId, newOwnerId)
+			? [transferApprovals(userId, newOwnerId)]
 			: []),
 
 		...(objectsToTransfer.length === 0
-			? transferApprovalTemplates(userId, newOwnerId)
+			? [transferApprovalTemplates(userId, newOwnerId)]
 			: []),
 
 		transferCustomApps(userId, newOwnerId, [
