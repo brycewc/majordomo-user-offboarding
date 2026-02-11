@@ -2201,78 +2201,8 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 			variables: {
 				id: null
 			},
-			query: `query getTemplateForEdit($id: ID!) {
-				template(id: $id) {
-					id
-					title
-					acknowledgment
-					description
-					providerName
-					isPublic
-					chainIsLocked
-					observers {
-						id
-						type
-						displayName
-						avatarKey
-						title
-						... on Group {
-							userCount
-						}
-					}
-					categories {
-						id
-					}
-					fields {
-						key
-						type
-						name
-						data
-						placeholder
-						required
-						isPrivate
-						... on SelectField {
-							option
-							multiselect
-							datasource
-							column
-							order
-						}
-					}
-					approvers {
-						type
-						originalType: type
-						key
-						... on ApproverPerson {
-							id: approverId
-							approverId
-							userDetails {
-								id
-								displayName
-								title
-								avatarKey
-								isDeleted
-							__typename
-							}
-						}
-						... on ApproverGroup {
-							id: approverId
-							approverId
-							groupDetails {
-								id
-								displayName
-								userCount
-								isDeleted
-							__typename
-							}
-						}
-						... on ApproverPlaceholder {
-							placeholderText
-						}
-						__typename
-					}
-				}
-			}`
+			query:
+				'query getTemplateForEdit($id: ID!) {\n  template(id: $id) {\n    id\n    title\n    titleName\n    titlePlaceholder\n    acknowledgment\n    instructions\n    description\n    providerName\n    isPublic\n    chainIsLocked\n    type\n    isPublished\n    observers {\n      id\n      type\n      displayName\n      avatarKey\n      title\n      ... on Group {\n        userCount\n        isDeleted\n        __typename\n      }\n      ... on User {\n        isDeleted\n        __typename\n      }      __typename\n    }\n    categories {\n      id\n      name\n      __typename\n    }\n    owner {\n      id\n      displayName\n      avatarKey\n      __typename\n    }\n    fields {\n      key\n      type\n      name\n      data\n      placeholder\n      required\n      isPrivate\n      ... on SelectField {\n        option\n        multiselect\n        datasource\n        column\n        order\n        __typename\n      }\n      __typename\n    }\n    approvers {\n      type\n      originalType: type\n      key\n      ... on ApproverPerson {\n        id: approverId\n        approverId\n        userDetails {\n          id\n          displayName\n          title\n          avatarKey\n          isDeleted\n          __typename\n        }\n        __typename\n      }\n      ... on ApproverGroup {\n        id: approverId\n        approverId\n        groupDetails {\n          id\n          displayName\n          userCount\n          isDeleted\n          __typename\n        }\n        __typename\n      }\n      ... on ApproverPlaceholder {\n        placeholderText\n        __typename\n      }\n      __typename\n    }\n    workflowIntegration {\n      modelId\n      modelVersion\n      startName\n      modelName\n      parameterMapping {\n        fields {\n          field\n          parameter\n          required\n          type\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n  categories {\n    id\n    name\n    __typename\n  }\n}'
 		};
 
 		// For each template—get full details, update owner, approvers, and observers—then save
@@ -2283,107 +2213,135 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 				url,
 				getTemplateBody
 			);
-			let template = getTemplateResponse.data.template;
-			template.ownerId = newOwnerId;
+			const rawTemplate = getTemplateResponse.data.template;
 
-			// Update approvers: if user is an approver, replace with new owner (only id, approverId, and type are required)
-			if (Array.isArray(template.approvers) && template.approvers.length > 0) {
-				template.approvers = template.approvers.map((approver) =>
-					approver.type === 'PERSON' &&
-					(approver.id == userId || approver.approverId == userId)
-						? { id: newOwnerId, approverId: newOwnerId, type: 'PERSON' }
-						: approver
-				);
-			}
-
-			// Remove duplicate approvers based on id, in case the new owner was already an approver
-			template.approvers = template.approvers.filter(
-				(value, index, self) =>
-					index === self.findIndex((approver) => approver.id === value.id)
+			// Remove approvers that are no longer active (isDeleted is nested differently per type)
+			const activeApprovers = (rawTemplate.approvers || []).filter(
+				(approver) =>
+					!(approver.type === 'PERSON' && approver.userDetails.isDeleted) &&
+					!(approver.type === 'GROUP' && approver.groupDetails.isDeleted)
 			);
 
-			// Update observers: if user is an observer, replace with new owner (only id and type are required)
-			if (Array.isArray(template.observers) && template.observers.length > 0) {
-				template.observers = template.observers.map((observer) =>
-					observer.type === 'PERSON' && observer.id == userId
-						? { id: newOwnerId, type: 'PERSON' }
-						: observer
-				);
+			// Update approvers: if user is an approver, replace with new owner
+			let approvers = activeApprovers.map((approver) =>
+				approver.type === 'PERSON' && approver.approverId == userId
+					? { approverId: newOwnerId, type: 'PERSON', key: approver.key }
+					: {
+							type: approver.type,
+							key: approver.key,
+							...(approver.approverId && { approverId: approver.approverId }),
+							...(approver.placeholderText && {
+								placeholderText: approver.placeholderText
+							})
+						}
+			);
+
+			// Remove duplicate approvers based on approverId, in case the new owner was already an approver
+			approvers = approvers.filter(
+				(value, index, self) =>
+					!value.approverId ||
+					index === self.findIndex((a) => a.approverId === value.approverId)
+			);
+
+			// Approvers cannot be empty—if all were removed, add the new owner as the approver
+			if (approvers.length === 0) {
+				approvers.push({ approverId: newOwnerId, type: 'PERSON', key: '0' });
 			}
+
+			// Update observers: if user is an observer, replace with new owner
+			// User observers only need id and type; Group observers also need userCount
+			let observers = (rawTemplate.observers || []).map((observer) => ({
+				id: observer.id == userId ? newOwnerId : observer.id,
+				type: observer.type,
+				...(observer.type === 'Group' &&
+					observer.userCount !== undefined && { userCount: observer.userCount })
+			}));
 
 			// Remove duplicate observers based on id, in case the new owner was already an observer
-			template.observers = template.observers.filter(
+			observers = observers.filter(
 				(value, index, self) =>
-					index === self.findIndex((observer) => observer.id === value.id)
+					index === self.findIndex((o) => o.id === value.id)
 			);
+
+			// Remove observers that are no longer active (check against raw data before we stripped fields)
+			const deletedObserverIds = new Set(
+				(rawTemplate.observers || [])
+					.filter((o) => o.isDeleted)
+					.map((o) => o.id)
+			);
+			observers = observers.filter((o) => !deletedObserverIds.has(o.id));
+
+			// Build a clean template input with only the fields TemplateInput expects
+			// (strip __typename, resolved nested objects like owner/userDetails/groupDetails, etc.)
+			const cleanTemplate = {
+				id: rawTemplate.id,
+				title: rawTemplate.title,
+				titleName: rawTemplate.titleName,
+				titlePlaceholder: rawTemplate.titlePlaceholder,
+				acknowledgment: rawTemplate.acknowledgment,
+				instructions: rawTemplate.instructions,
+				description: rawTemplate.description,
+				providerName: rawTemplate.providerName,
+				isPublic: rawTemplate.isPublic,
+				chainIsLocked: rawTemplate.chainIsLocked,
+				type: rawTemplate.type,
+				isPublished: rawTemplate.isPublished,
+				ownerId: newOwnerId,
+				fields: (rawTemplate.fields || []).map((field) => ({
+					key: field.key,
+					type: field.type,
+					name: field.name,
+					placeholder: field.placeholder,
+					required: field.required,
+					isPrivate: field.isPrivate,
+					...(field.data !== undefined && { data: field.data }),
+					// Include SelectField-specific properties if present
+					...(field.option !== undefined && { option: field.option }),
+					...(field.multiselect !== undefined && {
+						multiselect: field.multiselect
+					}),
+					...(field.datasource !== undefined && {
+						datasource: field.datasource
+					}),
+					...(field.column !== undefined && { column: field.column }),
+					...(field.order !== undefined && { order: field.order })
+				})),
+				approvers: approvers,
+				observers: observers,
+				categories: (rawTemplate.categories || []).map((c) => ({
+					id: c.id,
+					name: c.name
+				}))
+			};
+
+			// Include workflowIntegration if present
+			if (rawTemplate.workflowIntegration) {
+				cleanTemplate.workflowIntegration = {
+					modelId: rawTemplate.workflowIntegration.modelId,
+					modelVersion: rawTemplate.workflowIntegration.modelVersion,
+					startName: rawTemplate.workflowIntegration.startName,
+					modelName: rawTemplate.workflowIntegration.modelName
+				};
+				if (rawTemplate.workflowIntegration.parameterMapping) {
+					cleanTemplate.workflowIntegration.parameterMapping = {
+						fields: (
+							rawTemplate.workflowIntegration.parameterMapping.fields || []
+						).map((f) => ({
+							field: f.field,
+							parameter: f.parameter,
+							required: f.required,
+							type: f.type
+						}))
+					};
+				}
+			}
 
 			const transferTemplateBody = {
 				operationName: 'saveTemplate',
 				variables: {
-					template: template
+					template: cleanTemplate
 				},
-				query: `mutation saveTemplate($template: TemplateInput!) {
-						template: saveTemplate(template: $template) {
-							id
-							title
-							titleName
-							titlePlaceholder
-							acknowledgment
-							instructions
-							description
-							providerName
-							isPublic
-							chainIsLocked
-							owner {
-								id
-								displayName
-								avatarKey
-								__typename
-							}
-							fields {
-								key
-								type
-								name
-								placeholder
-								required
-								isLocked
-								__typename
-							}
-							approvers {
-							type
-							originalType: type
-							key
-							... on ApproverPerson {
-								approverId
-								userDetails {
-									id
-									displayName
-									title
-									avatarKey
-									__typename
-								}
-								__typename
-							}
-							... on ApproverGroup {
-								approverId
-								groupDetails {
-									id
-									displayName
-									userCount
-									isDeleted
-									__typename
-								}
-								__typename
-							}
-							... on ApproverPlaceholder {
-								placeholderText
-								__typename
-							}
-							__typename
-							}
-							__typename
-						}
-					}`
+				query: `mutation saveTemplate($template: TemplateInput!) {\n  template: saveTemplate(template: $template) {\n    id\n    title\n    titleName\n    titlePlaceholder\n    acknowledgment\n    instructions\n    description\n    providerName\n    isPublic\n    chainIsLocked\n    owner {\n      id\n      displayName\n      avatarKey\n      __typename\n    }\n    fields {\n      key\n      type\n      name\n      placeholder\n      required\n      isLocked\n      __typename\n    }\n    approvers {\n      type\n      originalType: type\n      key\n      ... on ApproverPerson {\n        approverId\n        userDetails {\n          id\n          displayName\n          title\n          avatarKey\n          __typename\n        }\n        __typename\n      }\n      ... on ApproverGroup {\n        approverId\n        groupDetails {\n          id\n          displayName\n          userCount\n          isDeleted\n          __typename\n        }\n        __typename\n      }\n      ... on ApproverPlaceholder {\n        placeholderText\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}`
 			};
 
 			await handleRequest('POST', url, transferTemplateBody);
@@ -2414,10 +2372,11 @@ async function transferCustomApps(userId, newOwnerId, filteredIds = []) {
 				if (
 					response.versions &&
 					response.versions.length > 0 &&
-					Object(response.versions[0]).hasOwnProperty('flags')
+					Object.hasOwn(Object(response.versions[0]), 'flags')
 				) {
 					if (
-						Object(response.versions[0].flags).hasOwnProperty(
+						Object.hasOwn(
+							Object(response.versions[0].flags),
 							'client-code-enabled'
 						)
 					) {
@@ -2454,10 +2413,11 @@ async function transferCustomApps(userId, newOwnerId, filteredIds = []) {
 						if (
 							response[i].versions &&
 							response[i].versions.length > 0 &&
-							Object(response[i].versions[0]).hasOwnProperty('flags')
+							Object.hasOwn(Object(response[i].versions[0]), 'flags')
 						) {
 							if (
-								Object(response[i].versions[0].flags).hasOwnProperty(
+								Object.hasOwn(
+									Object(response[i].versions[0].flags),
 									'client-code-enabled'
 								)
 							) {
