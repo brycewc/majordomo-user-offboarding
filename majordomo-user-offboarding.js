@@ -1217,20 +1217,16 @@ async function transferAppDbCollections(userId, newOwnerId, filteredIds = []) {
 // Need to update to delete Beast Modes on deleted DataSets that have 0 dependencies
 // Helper: verify referenced resources exist; if not, drop links before update
 async function resourceExists(type, id) {
-	try {
-		if (type === 'CARD') {
-			await handleRequest('GET', `/api/content/v1/cards/${id}/details`);
-			return true;
-		}
-		if (type === 'DATA_SOURCE' || type === 'DATASET') {
-			await handleRequest('GET', `/api/data/v3/datasources/${id}`);
-			return true;
-		}
-		// For other types, don't validate here
-		return true;
-	} catch (_err) {
-		return false;
+	if (type === 'CARD') {
+		const result = await handleRequest('GET', `/api/content/v1/cards/${id}/details`);
+		return result !== undefined;
 	}
+	if (type === 'DATA_SOURCE' || type === 'DATASET') {
+		const result = await handleRequest('GET', `/api/data/v3/datasources/${id}`);
+		return result !== undefined;
+	}
+	// For other types, don't validate here
+	return true;
 }
 
 async function sanitizeLinks(links) {
