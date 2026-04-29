@@ -845,27 +845,30 @@ async function transferAppStudioApps(userId, newOwnerId, filteredIds = []) {
 		const limit = 30;
 		let skip = 0;
 		let moreData = true;
-		const data = {};
+		const data = {
+			ascending: true,
+			includeOwnerClause: true,
+			includeTitleClause: true,
+			orderBy: 'title',
+			ownerIds: [userId],
+			titleSearchText: ''
+		};
 
 		while (moreData) {
 			const url = `/api/content/v1/dataapps/adminsummary?limit=${limit}&skip=${skip}`;
 			const response = await handleRequest('POST', url, data);
 
-			if (
-				response.dataAppAdminSummaries &&
-				response.dataAppAdminSummaries.length > 0
-			) {
+			const summaries = response.dataAppAdminSummaries;
+			if (summaries && summaries.length > 0) {
 				// Extract ids and append to list
-				const apps = response.dataAppAdminSummaries
-					.filter((item) => item.owners.some((owner) => owner.id == userId))
-					.map((item) => item.dataAppId.toString());
+				const apps = summaries.map((item) => item.dataAppId.toString());
 				allApps.push(...apps);
 
 				// Increment offset to get next page
 				skip += limit;
 
 				// If less than pageSize returned, this is the last page
-				if (response.dataAppAdminSummaries.length < limit) {
+				if (summaries.length < limit) {
 					moreData = false;
 				}
 			} else {
@@ -1070,13 +1073,41 @@ async function getCurrentPeriod() {
 async function transferGoals(userId, newOwnerId, periodId) {
 	const url = `api/social/v2/objectives/profile?filterKeyResults=false&includeSampleGoal=false&periodId=${periodId}&ownerId=${userId}`;
 
-	const goals = await handleRequest('GET', url);
-	if (goals && goals.length > 0) {
-		for (let i = 0; i < goals.length; i++) {
-			const goalUrl = `/api/social/v1/objectives/${goals[i].id}`;
+	const data = await handleRequest('GET', url);
+	if (!data) return;
 
-			goals[i].ownerId = newOwnerId;
-			goals[i].owners = [
+	// Response is { assigned, company, contributing, personal, team }
+	// where each is an array of goals, except team which is a map of groupId → goal[]
+	const seen = new Set();
+	const allGoals = [];
+
+	const collectGoals = (arr) => {
+		if (!Array.isArray(arr)) return;
+		for (const g of arr) {
+			if (g.id != null && !seen.has(g.id)) {
+				seen.add(g.id);
+				allGoals.push(g);
+			}
+		}
+	};
+
+	collectGoals(data.assigned);
+	collectGoals(data.company);
+	collectGoals(data.contributing);
+	collectGoals(data.personal);
+
+	if (data.team && typeof data.team === 'object') {
+		for (const goals of Object.values(data.team)) {
+			collectGoals(goals);
+		}
+	}
+
+	if (allGoals.length > 0) {
+		for (let i = 0; i < allGoals.length; i++) {
+			const goalUrl = `/api/social/v1/objectives/${allGoals[i].id}`;
+
+			allGoals[i].ownerId = newOwnerId;
+			allGoals[i].owners = [
 				{
 					ownerId: newOwnerId,
 					ownerType: 'USER',
@@ -1084,7 +1115,7 @@ async function transferGoals(userId, newOwnerId, periodId) {
 				}
 			];
 
-			const body = goals[i];
+			const body = allGoals[i];
 
 			await handleRequest('PUT', goalUrl, body);
 		}
@@ -1092,7 +1123,7 @@ async function transferGoals(userId, newOwnerId, periodId) {
 			userId,
 			newOwnerId,
 			'GOAL',
-			goals.map((goal) => goal.id)
+			allGoals.map((goal) => goal.id)
 		);
 	}
 }
