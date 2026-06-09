@@ -2,8 +2,7 @@
 const codeengine = require('codeengine');
 
 const logDatasetId = '83dec9f2-206b-445a-90ea-b6a368b3157d'; // Format: userId,newOwnerId,type,id,date,status,notes
-const domostatsScheduledReportsDatasetId =
-	'b7306441-b8a7-481c-baaf-4fffadb0ff61'; // https://www.domo.com/appstore/connector/domostats/datasets
+const domostatsScheduledReportsDatasetId = 'b7306441-b8a7-481c-baaf-4fffadb0ff61'; // https://www.domo.com/appstore/connector/domostats/datasets
 
 class Helpers {
 	/**
@@ -13,37 +12,41 @@ class Helpers {
 	 * @param {Object} [body=null] - The request body
 	 * @param {Object} [headers=null] - The request headers
 	 * @param {text} [content='application/json'] - Request body content type
+	 * @param {boolean} [throwOnError=false] - When true, re-throw on failure instead of swallowing the error. Errors are swallowed by default so that one failed call (e.g. a single object during a bulk transfer) doesn't abort the rest. Operations that must fail loudly when the request fails (e.g. deleting a user or session) should pass true.
 	 * @returns {Object} The response data
-	 * @throws {Error} If the request fails
+	 * @throws {Error} If the request fails and throwOnError is true
 	 */
 	static async handleRequest(
 		method,
 		url,
 		body = null,
 		headers = null,
-		contentType = 'application/json'
+		contentType = 'application/json',
+		throwOnError = false
 	) {
 		try {
-			return await codeengine.sendRequest(
-				method,
-				url,
-				body,
-				headers,
-				contentType
-			);
+			return await codeengine.sendRequest(method, url, body, headers, contentType);
 		} catch (error) {
 			console.error(
 				`Error with ${method} request to ${url}\nError:\n${JSON.stringify(
 					error
 				)}\nPayload:\n${JSON.stringify(body, null, 2)}`
 			);
-			// throw error;
+			if (throwOnError) {
+				throw error;
+			}
 		}
 	}
 }
 
 const { handleRequest } = Helpers;
 
+/**
+ * Look up a Domo user's display name by user ID.
+ * @summary Get User Name
+ * @param {number} userId - The Domo user ID to look up
+ * @returns {text} userName - The user's display name, or null if not found
+ */
 async function getUserName(userId) {
 	const url = `/api/content/v3/users/${userId}`;
 	const user = await handleRequest('GET', url);
@@ -53,13 +56,12 @@ async function getUserName(userId) {
 /**
  * Retrieve all active sessions and delete those belonging to the specified user.
  *
- * @param {string} userId - The Domo user ID for which to delete active sessions.
- * @returns {Promise<void>} Resolves when all user's sessions are deleted or rejects on error.
+ * @param {number} userId - The Domo user ID for which to delete active sessions.
  */
 async function deleteUserSessions(userId) {
 	const url = '/api/sessions/v1/admin?limit=99999999';
 	// Fetch all sessions (potentially large number depending on 'limit')
-	const response = await handleRequest('GET', url);
+	const response = await handleRequest('GET', url, null, null, 'application/json', true);
 
 	// Find sessions assigned to the specified user
 	const sessionsToDelete = response.filter((s) => s.userId === userId);
@@ -73,12 +75,11 @@ async function deleteUserSessions(userId) {
  * Retrieve all active sessions and delete those belonging to the specified users.
  *
  * @param {number[]} userIds - Array of Domo user IDs for which to delete active sessions.
- * @returns {Promise<void>} Resolves when all users' sessions are deleted or rejects on error.
  */
 async function deleteUsersSessions(userIds) {
 	const url = '/api/sessions/v1/admin?limit=99999999';
 	// Fetch all sessions (potentially large number depending on 'limit')
-	const response = await handleRequest('GET', url);
+	const response = await handleRequest('GET', url, null, null, 'application/json', true);
 
 	// Find sessions assigned to any of the specified users
 	const sessionsToDelete = response.filter((s) => userIds.includes(s.userId));
@@ -92,27 +93,39 @@ async function deleteUsersSessions(userIds) {
  * Delete a session by its session ID.
  *
  * @param {string} sessionId - The ID of the session to delete.
- * @returns {Promise<void>} Resolves after session deletion, or logs error if deletion fails.
  */
 async function deleteSession(sessionId) {
 	const url = `api/sessions/v1/admin/${sessionId}`;
 
-	await handleRequest('DELETE', url);
+	// Pass throwOnError so a failed deletion surfaces as a failure instead of
+	// being silently swallowed by handleRequest.
+	await handleRequest('DELETE', url, null, null, 'application/json', true);
 }
 
 /**
  * Delete a user by its ID.
  *
- * @param {string} userId - The ID of the user to delete.
- * @returns {Promise<void>} Resolves after session deletion, or logs error if deletion fails.
+ * @param {number} userId - The ID of the user to delete.
  */
 async function deleteUser(userId) {
 	const url = `/api/identity/v1/users/${userId}`;
 
-	await handleRequest('DELETE', url);
+	// Pass throwOnError so a failed deletion surfaces as a failure to the
+	// workflow instead of being silently swallowed by handleRequest.
+	await handleRequest('DELETE', url, null, null, 'application/json', true);
 }
 
-async function appendToDataset(csvValues, datasetId = logDatasetId) {
+/**
+ * Append CSV rows to a Domo DataSet via an upload session (start, upload, commit).
+ * @summary Append to Dataset
+ * @param {text} csvValues - The CSV-formatted rows to append
+ * @param {text} [datasetId='83dec9f2-206b-445a-90ea-b6a368b3157d'] - The target DataSet ID; defaults to the offboarding log DataSet
+ * @returns {object} response - The commit response
+ */
+async function appendToDataset(csvValues, datasetId) {
+	// Default to the offboarding log DataSet when no target is provided. (Kept in
+	// the body rather than the signature so the JSDoc default stays representable.)
+	if (!datasetId) datasetId = logDatasetId;
 	const uploadUrl = `api/data/v3/datasources/${datasetId}/uploads`;
 	const uploadBody = {
 		action: 'APPEND',
@@ -139,22 +152,23 @@ async function appendToDataset(csvValues, datasetId = logDatasetId) {
 	return await handleRequest('PUT', commitUrl, commitBody);
 }
 
-async function logTransfers(
-	userId,
-	newOwnerId,
-	type,
-	ids,
-	status = 'TRANSFERRED',
-	notes = null
-) {
+/**
+ * Append transfer records to the offboarding log DataSet in batches.
+ * @summary Log Transfers
+ * @param {number} userId - The Domo user ID of the departing owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text} type - The Domo object type being logged
+ * @param {text[]} ids - The IDs of the objects being logged
+ * @param {text} [status='TRANSFERRED'] - The status to record for each row
+ * @param {text} [notes=null] - Optional notes to record for each row
+ */
+async function logTransfers(userId, newOwnerId, type, ids, status = 'TRANSFERRED', notes = null) {
 	const BATCH_SIZE = 50;
 	let batch = [];
 	const date = new Date().toISOString().slice(0, -5); // Format: YYYY-MM-DDTHH:mm:ss
 
 	for (const id of ids) {
-		batch.push(
-			`${userId},${newOwnerId},${type},${id},${date},${status},${notes}`
-		);
+		batch.push(`${userId},${newOwnerId},${type},${id},${date},${status},${notes}`);
 
 		if (batch.length >= BATCH_SIZE) {
 			try {
@@ -177,6 +191,15 @@ async function logTransfers(
 
 //---------------------------TRANSFER-----------------------//
 
+/**
+ * Transfer all (or a selected subset of) content owned by a user to a new owner.
+ * When objectsToTransfer is empty every supported object type is discovered and
+ * transferred; otherwise only the provided objects are transferred.
+ * @summary Transfer Content
+ * @param {number} userId - The Domo user ID of the departing owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {object} [objectsToTransfer=[]] - Specific objects to transfer as { type, id } entries; empty transfers everything
+ */
 async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 	let currentPeriodId = await getCurrentPeriod();
 
@@ -205,48 +228,23 @@ async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 
 		transferAlerts(userId, newOwnerId, objectsByType['ALERT'] || []),
 
-		transferWorkflows(
-			userId,
-			newOwnerId,
-			objectsByType['WORKFLOW_MODEL'] || []
-		),
+		transferWorkflows(userId, newOwnerId, objectsByType['WORKFLOW_MODEL'] || []),
 
-		transferTaskCenterQueues(
-			userId,
-			newOwnerId,
-			objectsByType['HOPPER_QUEUE'] || []
-		),
+		transferTaskCenterQueues(userId, newOwnerId, objectsByType['HOPPER_QUEUE'] || []),
 
-		transferTaskCenterTasks(
-			userId,
-			newOwnerId,
-			objectsByType['HOPPER_TASK'] || []
-		),
+		transferTaskCenterTasks(userId, newOwnerId, objectsByType['HOPPER_TASK'] || []),
 
 		transferAppStudioApps(userId, newOwnerId, objectsByType['DATA_APP'] || []),
 
 		transferPages(userId, newOwnerId, objectsByType['PAGE'] || []),
 
-		transferScheduledReports(
-			userId,
-			newOwnerId,
-			objectsByType['REPORT_SCHEDULE'] || []
-		),
+		transferScheduledReports(userId, newOwnerId, objectsByType['REPORT_SCHEDULE'] || []),
 
-		transferGoals(
-			userId,
-			newOwnerId,
-			currentPeriodId,
-			objectsByType['GOAL'] || []
-		),
+		transferGoals(userId, newOwnerId, currentPeriodId, objectsByType['GOAL'] || []),
 
 		transferGroups(userId, newOwnerId, objectsByType['GROUP'] || []),
 
-		transferAppDbCollections(
-			userId,
-			newOwnerId,
-			objectsByType['COLLECTION'] || []
-		),
+		transferAppDbCollections(userId, newOwnerId, objectsByType['COLLECTION'] || []),
 
 		transferFunctions(userId, newOwnerId, [
 			...(objectsByType['BEAST_MODE_FORMULA'] || []),
@@ -255,42 +253,23 @@ async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 
 		transferAccounts(userId, newOwnerId, objectsByType['ACCOUNT'] || []),
 
-		transferJupyterWorkspaces(
-			userId,
-			newOwnerId,
-			objectsByType['DATA_SCIENCE_NOTEBOOK'] || []
-		),
+		transferJupyterWorkspaces(userId, newOwnerId, objectsByType['DATA_SCIENCE_NOTEBOOK'] || []),
 
-		transferCodeEnginePackages(
-			userId,
-			newOwnerId,
-			objectsByType['CODEENGINE_PACKAGE'] || []
-		),
+		transferCodeEnginePackages(userId, newOwnerId, objectsByType['CODEENGINE_PACKAGE'] || []),
 
 		transferFilesets(userId, newOwnerId, objectsByType['FILESET'] || []),
 
 		getPublications(userId, newOwnerId, objectsByType['PUBLICATION'] || []),
 
-		transferSubscriptions(
-			userId,
-			newOwnerId,
-			objectsByType['SUBSCRIPTION'] || []
-		),
+		transferSubscriptions(userId, newOwnerId, objectsByType['SUBSCRIPTION'] || []),
 
 		transferRepositories(userId, newOwnerId, objectsByType['REPOSITORY'] || []),
 
-		...(objectsToTransfer.length === 0
-			? [transferApprovals(userId, newOwnerId)]
-			: []),
+		...(objectsToTransfer.length === 0 ? [transferApprovals(userId, newOwnerId)] : []),
 
-		...(objectsToTransfer.length === 0
-			? [transferApprovalTemplates(userId, newOwnerId)]
-			: []),
+		...(objectsToTransfer.length === 0 ? [transferApprovalTemplates(userId, newOwnerId)] : []),
 
-		transferCustomApps(userId, newOwnerId, [
-			...(objectsByType['APP'] || []),
-			...(objectsByType['RYUU_APP'] || [])
-		]),
+		transferCustomApps(userId, newOwnerId, [...(objectsByType['APP'] || []), ...(objectsByType['RYUU_APP'] || [])]),
 
 		transferAiModels(userId, newOwnerId, objectsByType['AI_MODEL'] || []),
 
@@ -301,12 +280,25 @@ async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 			...(objectsByType['PROJECT'] || [])
 		]),
 
-		transferMetrics(userId, newOwnerId, objectsByType['METRIC'] || [])
+		transferMetrics(userId, newOwnerId, objectsByType['METRIC'] || []),
+
+		transferWorksheets(userId, newOwnerId, objectsByType['WORKSHEET'] || []),
+
+		transferWorkspaces(userId, newOwnerId, objectsByType['WORKSPACE'] || [])
 	]);
 }
 
 //-------------------------DataSets--------------------------//
 
+/**
+ * Transfer ownership of DataSets from a user to a new owner and tag them with the
+ * former owner's name. When filteredIds is provided only those DataSets are
+ * transferred; otherwise every DataSet owned by the user is discovered and transferred.
+ * @summary Transfer Datasets
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific DataSet IDs to transfer; empty transfers all owned by the user
+ */
 async function transferDatasets(userId, newOwnerId, filteredIds = []) {
 	const userName = await getUserName(userId);
 
@@ -362,6 +354,15 @@ async function transferDatasets(userId, newOwnerId, filteredIds = []) {
 
 //----------------------------DataFlows-----------------------//
 
+/**
+ * Transfer ownership of DataFlows from a user to a new owner and tag them with the
+ * former owner's name. When filteredIds is provided only those DataFlows are
+ * transferred; otherwise every DataFlow owned by the user is discovered and transferred.
+ * @summary Transfer Dataflows
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific DataFlow IDs to transfer; empty transfers all owned by the user
+ */
 async function transferDataflows(userId, newOwnerId, filteredIds = []) {
 	const userName = await getUserName(userId);
 
@@ -391,11 +392,7 @@ async function transferDataflows(userId, newOwnerId, filteredIds = []) {
 				offset: offset
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/search/v1/query',
-				data
-			);
+			const response = await handleRequest('POST', '/api/search/v1/query', data);
 
 			if (response.searchObjects && response.searchObjects.length > 0) {
 				// Extract ids and append to list
@@ -433,11 +430,7 @@ async function transferDataflows(userId, newOwnerId, filteredIds = []) {
 						dataFlowIds: allIds,
 						tagNames: oldTags
 					};
-					await handleRequest(
-						'PUT',
-						'/api/dataprocessing/v1/dataflows/bulk/tag/delete',
-						removetagsBody
-					);
+					await handleRequest('PUT', '/api/dataprocessing/v1/dataflows/bulk/tag/delete', removetagsBody);
 				}
 			}
 		}
@@ -459,17 +452,22 @@ async function transferDataflows(userId, newOwnerId, filteredIds = []) {
 				dataFlowIds: chunk,
 				tagNames: [`From ${userName}`]
 			};
-			await handleRequest(
-				'PUT',
-				'/api/dataprocessing/v1/dataflows/bulk/tag',
-				addTagsBody
-			);
+			await handleRequest('PUT', '/api/dataprocessing/v1/dataflows/bulk/tag', addTagsBody);
 		}
 	}
 }
 
 //----------------------Cards-------------------------//
 
+/**
+ * Transfer ownership of Cards from a user to a new owner. When filteredIds is
+ * provided only those Cards are transferred; otherwise every Card owned by the
+ * user is discovered and transferred.
+ * @summary Transfer Cards
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Card IDs to transfer; empty transfers all owned by the user
+ */
 async function transferCards(userId, newOwnerId, filteredIds = []) {
 	const url = '/api/search/v1/query';
 
@@ -552,10 +550,13 @@ async function transferCards(userId, newOwnerId, filteredIds = []) {
 
 // -----------------Alerts--------------------------//
 /**
- * Get alerts a user is subscribed to
- *
- * @param {string} userId - The ID of the user to get alerts for.
- * @returns {List<int>} List of alert IDs the user is subscribed to.
+ * Transfer ownership of Alerts from a user to a new owner. When filteredIds is
+ * provided only those Alerts are transferred; otherwise every Alert owned by the
+ * user is discovered and transferred.
+ * @summary Transfer Alerts
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Alert IDs to transfer; empty transfers all owned by the user
  */
 async function transferAlerts(userId, newOwnerId, filteredIds = []) {
 	let alerts = [];
@@ -610,10 +611,14 @@ async function transferAlerts(userId, newOwnerId, filteredIds = []) {
 
 //---------------------------Workflows--------------------------------//
 /**
- * Get Workflows owned by given user ID and transfer ownership by updating the full workflow object
- *
- * @param {string} userId - The ID of the owner to search for.
- * @param {string} newOwnerId - The ID of the new owner.
+ * Transfer ownership of Workflows from a user to a new owner by updating the full
+ * workflow object. When filteredIds is provided only those Workflows are
+ * transferred; otherwise every Workflow owned by the user is discovered and
+ * transferred.
+ * @summary Transfer Workflows
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Workflow IDs to transfer; empty transfers all owned by the user
  */
 async function transferWorkflows(userId, newOwnerId, filteredIds = []) {
 	let workflowIds = [];
@@ -643,11 +648,7 @@ async function transferWorkflows(userId, newOwnerId, filteredIds = []) {
 				]
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/search/v1/query',
-				data
-			);
+			const response = await handleRequest('POST', '/api/search/v1/query', data);
 
 			if (response.searchObjects && response.searchObjects.length > 0) {
 				// Extract ids and append to list
@@ -674,20 +675,13 @@ async function transferWorkflows(userId, newOwnerId, filteredIds = []) {
 			const workflowId = workflowIds[i];
 
 			// Get the full workflow object
-			const workflow = await handleRequest(
-				'GET',
-				`/api/workflow/v1/models/${workflowId}`
-			);
+			const workflow = await handleRequest('GET', `/api/workflow/v1/models/${workflowId}`);
 
 			// Update the owner property
 			workflow.owner = newOwnerId.toString();
 
 			// Save the workflow with the updated owner
-			await handleRequest(
-				'PUT',
-				`/api/workflow/v1/models/${workflowId}`,
-				workflow
-			);
+			await handleRequest('PUT', `/api/workflow/v1/models/${workflowId}`, workflow);
 		}
 
 		await logTransfers(userId, newOwnerId, 'WORKFLOW_MODEL', workflowIds);
@@ -696,6 +690,15 @@ async function transferWorkflows(userId, newOwnerId, filteredIds = []) {
 
 //--------------------------Task Center Queues--------------------------//
 
+/**
+ * Transfer ownership of Task Center Queues from a user to a new owner. When
+ * filteredIds is provided only those Queues are transferred; otherwise every Queue
+ * owned by the user is discovered and transferred.
+ * @summary Transfer Task Center Queues
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Queue IDs to transfer; empty transfers all owned by the user
+ */
 async function transferTaskCenterQueues(userId, newOwnerId, filteredIds = []) {
 	let queues = [];
 
@@ -724,11 +727,7 @@ async function transferTaskCenterQueues(userId, newOwnerId, filteredIds = []) {
 				]
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/search/v1/query',
-				data
-			);
+			const response = await handleRequest('POST', '/api/search/v1/query', data);
 
 			if (response.searchObjects && response.searchObjects.length > 0) {
 				// Extract ids and append to list
@@ -751,12 +750,9 @@ async function transferTaskCenterQueues(userId, newOwnerId, filteredIds = []) {
 
 	if (queues.length > 0) {
 		for (let i = 0; i < queues.length; i++) {
-			await handleRequest(
-				'PUT',
-				`/api/queues/v1/${queues[i]}/owner/${newOwnerId}`,
-				null,
-				{ 'Content-Type': 'application/json' }
-			);
+			await handleRequest('PUT', `/api/queues/v1/${queues[i]}/owner/${newOwnerId}`, null, {
+				'Content-Type': 'application/json'
+			});
 		}
 
 		await logTransfers(userId, newOwnerId, 'HOPPER_QUEUE', queues);
@@ -765,6 +761,15 @@ async function transferTaskCenterQueues(userId, newOwnerId, filteredIds = []) {
 
 //--------------------------Task Center Tasks--------------------------//
 
+/**
+ * Transfer (reassign) Task Center Tasks from a user to a new owner. When
+ * filteredIds is provided only those Tasks are reassigned; otherwise every open
+ * Task assigned to the user is discovered and reassigned.
+ * @summary Transfer Task Center Tasks
+ * @param {number} userId - The Domo user ID of the current (departing) assignee
+ * @param {number} newOwnerId - The Domo user ID of the new assignee
+ * @param {text[]} [filteredIds=[]] - Specific Task IDs to reassign; empty reassigns all assigned to the user
+ */
 async function transferTaskCenterTasks(userId, newOwnerId, filteredIds = []) {
 	let tasks = [];
 
@@ -784,11 +789,10 @@ async function transferTaskCenterTasks(userId, newOwnerId, filteredIds = []) {
 		let moreData = true;
 
 		while (moreData) {
-			const response = await handleRequest(
-				'POST',
-				`/api/queues/v1/tasks/list?limit=${limit}&offset=${offset}`,
-				{ assignedTo: [userId], status: ['OPEN'] }
-			);
+			const response = await handleRequest('POST', `/api/queues/v1/tasks/list?limit=${limit}&offset=${offset}`, {
+				assignedTo: [userId],
+				status: ['OPEN']
+			});
 
 			if (response && response.length > 0) {
 				// Extract ids and append to list
@@ -834,6 +838,15 @@ async function transferTaskCenterTasks(userId, newOwnerId, filteredIds = []) {
 
 //------------------------------------App Studio--------------------------//
 
+/**
+ * Transfer ownership of App Studio apps from a user to a new owner. When
+ * filteredIds is provided only those apps are transferred; otherwise every App
+ * Studio app owned by the user is discovered and transferred.
+ * @summary Transfer App Studio Apps
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific app IDs to transfer; empty transfers all owned by the user
+ */
 async function transferAppStudioApps(userId, newOwnerId, filteredIds = []) {
 	let allApps = [];
 
@@ -851,7 +864,11 @@ async function transferAppStudioApps(userId, newOwnerId, filteredIds = []) {
 			includeTitleClause: true,
 			orderBy: 'title',
 			ownerIds: [userId],
-			titleSearchText: ''
+			titleSearchText: '',
+			// Worksheets share this DATA_APP backend; the `type` filter keeps
+			// App Studio discovery to apps only so worksheets are handled solely
+			// by transferWorksheets (and not transferred/logged twice).
+			type: 'app'
 		};
 
 		while (moreData) {
@@ -893,18 +910,103 @@ async function transferAppStudioApps(userId, newOwnerId, filteredIds = []) {
 			owners: [{ type: 'USER', id: userId }]
 		};
 
-		await handleRequest(
-			'POST',
-			'/api/content/v1/dataapps/bulk/owners/remove',
-			removeBody
-		);
+		await handleRequest('POST', '/api/content/v1/dataapps/bulk/owners/remove', removeBody);
 
 		await logTransfers(userId, newOwnerId, 'DATA_APP', allApps);
 	}
 }
 
+//------------------------------------Worksheets--------------------------//
+// Worksheets live on the same DATA_APP backend as App Studio apps and share the
+// /dataapps/bulk/owners endpoints; the adminsummary `type` filter is what
+// separates them.
+
+/**
+ * Transfer ownership of Worksheets from a user to a new owner. When filteredIds
+ * is provided only those Worksheets are transferred; otherwise every Worksheet
+ * owned by the user is discovered and transferred.
+ * @summary Transfer Worksheets
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Worksheet IDs to transfer; empty transfers all owned by the user
+ */
+async function transferWorksheets(userId, newOwnerId, filteredIds = []) {
+	let allWorksheets = [];
+
+	if (filteredIds.length > 0) {
+		// Use the provided filtered list
+		allWorksheets = filteredIds.map((id) => id.toString());
+	} else {
+		// Use existing discovery logic
+		const limit = 30;
+		let skip = 0;
+		let moreData = true;
+		const data = {
+			ascending: true,
+			includeOwnerClause: true,
+			includeTitleClause: true,
+			orderBy: 'title',
+			ownerIds: [userId],
+			titleSearchText: '',
+			type: 'worksheet'
+		};
+
+		while (moreData) {
+			const url = `/api/content/v1/dataapps/adminsummary?limit=${limit}&skip=${skip}`;
+			const response = await handleRequest('POST', url, data);
+
+			const summaries = response.dataAppAdminSummaries;
+			if (summaries && summaries.length > 0) {
+				// Extract ids and append to list
+				const worksheets = summaries.map((item) => item.dataAppId.toString());
+				allWorksheets.push(...worksheets);
+
+				// Increment skip to get next page
+				skip += limit;
+
+				// If less than pageSize returned, this is the last page
+				if (summaries.length < limit) {
+					moreData = false;
+				}
+			} else {
+				// No more data returned, stop loop
+				moreData = false;
+			}
+		}
+	}
+
+	if (allWorksheets.length > 0) {
+		const addBody = {
+			note: '',
+			entityIds: allWorksheets,
+			owners: [{ type: 'USER', id: parseInt(newOwnerId) }],
+			sendEmail: false
+		};
+
+		await handleRequest('PUT', '/api/content/v1/dataapps/bulk/owners', addBody);
+
+		const removeBody = {
+			entityIds: allWorksheets,
+			owners: [{ type: 'USER', id: userId }]
+		};
+
+		await handleRequest('POST', '/api/content/v1/dataapps/bulk/owners/remove', removeBody);
+
+		await logTransfers(userId, newOwnerId, 'WORKSHEET', allWorksheets);
+	}
+}
+
 //-----------------------------------Pages------------------------------//
 
+/**
+ * Transfer ownership of Pages from a user to a new owner. When filteredIds is
+ * provided only those Pages are transferred; otherwise every Page owned by the
+ * user is discovered and transferred.
+ * @summary Transfer Pages
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Page IDs to transfer; empty transfers all owned by the user
+ */
 async function transferPages(userId, newOwnerId, filteredIds = []) {
 	let allPages = [];
 
@@ -930,10 +1032,7 @@ async function transferPages(userId, newOwnerId, filteredIds = []) {
 
 			const response = await handleRequest('POST', url, data);
 
-			if (
-				response.pageAdminSummaries &&
-				response.pageAdminSummaries.length > 0
-			) {
+			if (response.pageAdminSummaries && response.pageAdminSummaries.length > 0) {
 				// Extract ids and append to list
 				const pages = response.pageAdminSummaries.map((page) => page.pageId);
 				allPages.push(...pages);
@@ -970,17 +1069,22 @@ async function transferPages(userId, newOwnerId, filteredIds = []) {
 			pageIds: allPages
 		};
 
-		await handleRequest(
-			'POST',
-			'/api/content/v1/pages/bulk/owners/remove',
-			removeBody
-		);
+		await handleRequest('POST', '/api/content/v1/pages/bulk/owners/remove', removeBody);
 		await logTransfers(userId, newOwnerId, 'PAGE', allPages);
 	}
 }
 
 //---------------------------------Scheduled Reports--------------------------------//
 
+/**
+ * Transfer ownership of Scheduled Reports from a user to a new owner. When
+ * filteredIds is provided only those reports are transferred; otherwise the user's
+ * reports are discovered from the DomoStats Scheduled Reports DataSet and transferred.
+ * @summary Transfer Scheduled Reports
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Report IDs to transfer; empty transfers all owned by the user
+ */
 async function transferScheduledReports(userId, newOwnerId, filteredIds = []) {
 	let reportIds = [];
 
@@ -1061,15 +1165,24 @@ async function transferScheduledReports(userId, newOwnerId, filteredIds = []) {
 
 //---------------------------------------------Goals------------------------------------------------//
 
+/**
+ * Get the ID of the current Goals (objectives) period.
+ * @summary Get Current Period
+ * @returns {number} periodId - The ID of the current objectives period
+ */
 async function getCurrentPeriod() {
-	const response = await handleRequest(
-		'GET',
-		'/api/social/v1/objectives/periods?all=true'
-	);
+	const response = await handleRequest('GET', '/api/social/v1/objectives/periods?all=true');
 	const currentPeriod = response.find((period) => period.current);
 	return currentPeriod.id;
 }
 
+/**
+ * Transfer ownership of a user's Goals for a given objectives period to a new owner.
+ * @summary Transfer Goals
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {number} periodId - The objectives period ID to transfer goals within
+ */
 async function transferGoals(userId, newOwnerId, periodId) {
 	const url = `api/social/v2/objectives/profile?filterKeyResults=false&includeSampleGoal=false&periodId=${periodId}&ownerId=${userId}`;
 
@@ -1130,6 +1243,15 @@ async function transferGoals(userId, newOwnerId, periodId) {
 
 //-----------------------------------------Groups----------------------------------------//
 
+/**
+ * Transfer ownership of Groups from a user to a new owner. When filteredIds is
+ * provided only those Groups are transferred; otherwise every Group owned by the
+ * user is discovered and transferred.
+ * @summary Transfer Groups
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Group IDs to transfer; empty transfers all owned by the user
+ */
 async function transferGroups(userId, newOwnerId, filteredIds = []) {
 	let allGroupIds = [];
 
@@ -1183,6 +1305,15 @@ async function transferGroups(userId, newOwnerId, filteredIds = []) {
 //-----------------------------------------AppDB--------------------------------//
 // Datastore owner cannot be updated
 
+/**
+ * Transfer ownership of AppDB collections from a user to a new owner. When
+ * filteredIds is provided only those collections are transferred; otherwise every
+ * collection owned by the user is discovered and transferred.
+ * @summary Transfer AppDB Collections
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific collection IDs to transfer; empty transfers all owned by the user
+ */
 async function transferAppDbCollections(userId, newOwnerId, filteredIds = []) {
 	let allCollectionIds = [];
 
@@ -1208,16 +1339,10 @@ async function transferAppDbCollections(userId, newOwnerId, filteredIds = []) {
 				pageNumber: pageNumber
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/datastores/v1/collections/query',
-				data
-			);
+			const response = await handleRequest('POST', '/api/datastores/v1/collections/query', data);
 
 			if (response.collections && response.collections.length > 0) {
-				const collectionIds = response.collections.map(
-					(collection) => collection.id
-				);
+				const collectionIds = response.collections.map((collection) => collection.id);
 				allCollectionIds.push(...collectionIds);
 
 				// Increment page number to get next page
@@ -1246,35 +1371,95 @@ async function transferAppDbCollections(userId, newOwnerId, filteredIds = []) {
 
 //--------------------------Functions (Beast Modes and Variables)-------------------------//
 // Need to update to delete Beast Modes on deleted DataSets that have 0 dependencies
-// Helper: verify referenced resources exist; if not, drop links before update
-async function resourceExists(type, id) {
-	if (type === 'CARD') {
-		const result = await handleRequest('GET', `/api/content/v1/cards/${id}/details`);
-		return result !== undefined;
+// Determine whether a thrown request error represents a definitive
+// "resource not found" (404). The exact error shape from
+// codeengine.sendRequest isn't guaranteed, so check the common status
+// fields and fall back to a narrow match on a literal 404 in the message.
+// Deliberately strict: we only want to confirm a 404, never mistake a
+// transient 5xx/timeout for a missing resource.
+/**
+ * Determine whether a thrown request error represents a definitive 404 Not Found.
+ * @summary Is Not Found Error
+ * @private
+ * @param {object} error - The error thrown by a failed request
+ * @returns {boolean} isNotFound - True if the error is a definitive 404
+ */
+function isNotFoundError(error) {
+	if (!error) return false;
+	const status =
+		error.status ??
+		error.statusCode ??
+		error.code ??
+		(error.response && (error.response.status ?? error.response.statusCode));
+	if (status === 404 || status === '404') return true;
+	try {
+		const text = typeof error === 'string' ? error : error.message || JSON.stringify(error);
+		return /\b404\b/.test(text);
+	} catch (_e) {
+		return false;
 	}
-	if (type === 'DATA_SOURCE' || type === 'DATASET') {
-		const result = await handleRequest('GET', `/api/data/v3/datasources/${id}`);
-		return result !== undefined;
-	}
-	// For other types, don't validate here
-	return true;
 }
 
+// Helper: verify referenced resources exist; if not, drop links before update.
+// Fails safe: only reports a resource as missing on a definitive 404. Any other
+// failure (5xx, timeout, rate limit, auth, unknown shape) is treated as "exists"
+// so a transient error never causes links — or the Beast Mode/Variable itself —
+// to be dropped or deleted.
+/**
+ * Check whether a referenced resource still exists. Fails safe: only reports a
+ * resource as missing on a definitive 404, treating any other failure as "exists".
+ * @summary Resource Exists
+ * @param {text} type - The resource type (CARD, DATA_SOURCE, or DATASET)
+ * @param {text} id - The resource ID to check
+ * @returns {boolean} exists - True if the resource exists (or could not be confirmed missing)
+ */
+async function resourceExists(type, id) {
+	let url;
+	if (type === 'CARD') {
+		url = `/api/content/v1/cards/${id}/details`;
+	} else if (type === 'DATA_SOURCE' || type === 'DATASET') {
+		url = `/api/data/v3/datasources/${id}`;
+	} else {
+		// For other types, don't validate here
+		return true;
+	}
+
+	try {
+		// throwOnError so a 404 surfaces as an error rather than being
+		// swallowed into undefined (which we could not distinguish from a
+		// transient failure).
+		const result = await handleRequest('GET', url, null, null, 'application/json', true);
+		// A missing resource comes back as an HTTP 404 with a { status: 404 }
+		// body. Depending on how the request resolves, that 404 may arrive as a
+		// normal response body rather than a thrown error, so check the body too
+		// — otherwise the 404 object reads as a real resource ("exists").
+		if (result && (result.status === 404 || result.status === '404')) {
+			return false;
+		}
+		return true;
+	} catch (error) {
+		// Only a definitive 404 means the resource is gone. Any other failure
+		// (5xx, timeout, rate limit, auth, unknown shape) fails safe as "exists"
+		// so a transient error never drops links or deletes the Beast Mode/Variable.
+		return !isNotFoundError(error);
+	}
+}
+
+/**
+ * Split a set of function links into those whose referenced resources still exist
+ * (valid) and those that are missing or malformed (invalid).
+ * @summary Sanitize Links
+ * @param {object[]} links - The function links to validate
+ * @returns {object} result - An object with `valid` and `invalid` link arrays
+ */
 async function sanitizeLinks(links) {
-	if (!Array.isArray(links) || links.length === 0)
-		return { valid: [], invalid: [] };
+	if (!Array.isArray(links) || links.length === 0) return { valid: [], invalid: [] };
 	const valid = [];
 	const invalid = [];
 	for (const link of links) {
 		try {
 			const res = link && link.resource ? link.resource : null;
-			if (
-				res &&
-				res.id != null &&
-				(res.type === 'CARD' ||
-					res.type === 'DATA_SOURCE' ||
-					res.type === 'DATASET')
-			) {
+			if (res && res.id != null && (res.type === 'CARD' || res.type === 'DATA_SOURCE' || res.type === 'DATASET')) {
 				const exists = await resourceExists(res.type, res.id);
 				if (!exists) {
 					invalid.push(link);
@@ -1289,6 +1474,16 @@ async function sanitizeLinks(links) {
 	}
 	return { valid, invalid };
 }
+/**
+ * Transfer ownership of Functions (Beast Modes and Variables) from a user to a new
+ * owner, dropping links to deleted resources and deleting functions left invalid.
+ * When filteredIds is provided only those Functions are transferred; otherwise every
+ * Function owned by the user is discovered and transferred.
+ * @summary Transfer Functions
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Function IDs to transfer; empty transfers all owned by the user
+ */
 async function transferFunctions(userId, newOwnerId, filteredIds = []) {
 	let allFunctionIds = [];
 
@@ -1302,26 +1497,17 @@ async function transferFunctions(userId, newOwnerId, filteredIds = []) {
 
 		for (const functionId of filteredIds) {
 			try {
-				const response = await handleRequest(
-					'GET',
-					`/api/query/v1/functions/template/${functionId}?hidden=true`
-				);
+				const response = await handleRequest('GET', `/api/query/v1/functions/template/${functionId}?hidden=true`);
 
 				const originalLinks = response.links;
-				const { valid: validLinks, invalid: invalidLinks } =
-					await sanitizeLinks(originalLinks);
+				const { valid: validLinks, invalid: invalidLinks } = await sanitizeLinks(originalLinks);
 
 				// Check if any invalid links are visible
-				const hasInvalidVisibleLink = invalidLinks.some(
-					(link) => link.visible === true
-				);
+				const hasInvalidVisibleLink = invalidLinks.some((link) => link.visible === true);
 
 				// If function has only one link and it's invalid, OR has any invalid visible link, delete the function
 				if (
-					(originalLinks &&
-						originalLinks.length === 1 &&
-						invalidLinks.length === 1 &&
-						validLinks.length === 0) ||
+					(originalLinks && originalLinks.length === 1 && invalidLinks.length === 1 && validLinks.length === 0) ||
 					hasInvalidVisibleLink
 				) {
 					const deleteUrl = `/api/query/v1/functions/template/${functionId}`;
@@ -1427,37 +1613,25 @@ async function transferFunctions(userId, newOwnerId, filteredIds = []) {
 				offset: offset
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/query/v1/functions/search',
-				data
-			);
+			const response = await handleRequest('POST', '/api/query/v1/functions/search', data);
 
 			const bulkUrl = '/api/query/v1/functions/bulk/template';
 			if (response.results && response.results.length > 0) {
 				// Process beast modes
-				const beastModesRaw = response.results.filter(
-					(func) => func.global === false
-				);
+				const beastModesRaw = response.results.filter((func) => func.global === false);
 				const beastModes = [];
 				const deletedBeastModes = [];
 
 				for (const beastMode of beastModesRaw) {
 					const originalLinks = beastMode.links;
-					const { valid: validLinks, invalid: invalidLinks } =
-						await sanitizeLinks(originalLinks);
+					const { valid: validLinks, invalid: invalidLinks } = await sanitizeLinks(originalLinks);
 
 					// Check if any invalid links are visible
-					const hasInvalidVisibleLink = invalidLinks.some(
-						(link) => link.visible === true
-					);
+					const hasInvalidVisibleLink = invalidLinks.some((link) => link.visible === true);
 
 					// If function has only one link and it's invalid, OR has any invalid visible link, delete the function
 					if (
-						(originalLinks &&
-							originalLinks.length === 1 &&
-							invalidLinks.length === 1 &&
-							validLinks.length === 0) ||
+						(originalLinks && originalLinks.length === 1 && invalidLinks.length === 1 && validLinks.length === 0) ||
 						hasInvalidVisibleLink
 					) {
 						const deleteUrl = `/api/query/v1/functions/template/${beastMode.id}`;
@@ -1512,28 +1686,20 @@ async function transferFunctions(userId, newOwnerId, filteredIds = []) {
 				}
 
 				// Process variables
-				const variablesRaw = response.results.filter(
-					(func) => func.global === true
-				);
+				const variablesRaw = response.results.filter((func) => func.global === true);
 				const variables = [];
 				const deletedVariables = [];
 
 				for (const variable of variablesRaw) {
 					const originalLinks = variable.links;
-					const { valid: validLinks, invalid: invalidLinks } =
-						await sanitizeLinks(originalLinks);
+					const { valid: validLinks, invalid: invalidLinks } = await sanitizeLinks(originalLinks);
 
 					// Check if any invalid links are visible
-					const hasInvalidVisibleLink = invalidLinks.some(
-						(link) => link.visible === true
-					);
+					const hasInvalidVisibleLink = invalidLinks.some((link) => link.visible === true);
 
 					// If function has only one link and it's invalid, OR has any invalid visible link, delete the function
 					if (
-						(originalLinks &&
-							originalLinks.length === 1 &&
-							invalidLinks.length === 1 &&
-							validLinks.length === 0) ||
+						(originalLinks && originalLinks.length === 1 && invalidLinks.length === 1 && validLinks.length === 0) ||
 						hasInvalidVisibleLink
 					) {
 						const deleteUrl = `/api/query/v1/functions/template/${variable.id}`;
@@ -1601,6 +1767,15 @@ async function transferFunctions(userId, newOwnerId, filteredIds = []) {
 
 //-----------------------------Accounts---------------------//
 
+/**
+ * Transfer ownership of Accounts from a user to a new owner by granting the new
+ * owner OWNER access. When filteredIds is provided only those Accounts are
+ * transferred; otherwise every Account owned by the user is discovered and transferred.
+ * @summary Transfer Accounts
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Account IDs to transfer; empty transfers all owned by the user
+ */
 async function transferAccounts(userId, newOwnerId, filteredIds = []) {
 	let accountIds = [];
 
@@ -1634,19 +1809,10 @@ async function transferAccounts(userId, newOwnerId, filteredIds = []) {
 				entityList: [['account']]
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/search/v1/query',
-				data
-			);
-			if (
-				response.searchResultsMap &&
-				response.searchResultsMap.account.length > 0
-			) {
+			const response = await handleRequest('POST', '/api/search/v1/query', data);
+			if (response.searchResultsMap && response.searchResultsMap.account.length > 0) {
 				// Extract ids and append to list
-				const ids = response.searchResultsMap.account.map(
-					(account) => account.databaseId
-				);
+				const ids = response.searchResultsMap.account.map((account) => account.databaseId);
 				accountIds.push(...ids);
 
 				// Increment offset to get next page
@@ -1680,6 +1846,15 @@ async function transferAccounts(userId, newOwnerId, filteredIds = []) {
 
 //---------------------------Jupyter Workspaces---------------------//
 
+/**
+ * Transfer ownership of Jupyter (data science) workspaces from a user to a new
+ * owner. When filteredIds is provided only those workspaces are transferred;
+ * otherwise every workspace owned by the user is discovered and transferred.
+ * @summary Transfer Jupyter Workspaces
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific workspace IDs to transfer; empty transfers all owned by the user
+ */
 async function transferJupyterWorkspaces(userId, newOwnerId, filteredIds = []) {
 	let jupyterWorkspaceIds = [];
 
@@ -1708,11 +1883,7 @@ async function transferJupyterWorkspaces(userId, newOwnerId, filteredIds = []) {
 				limit: limit
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/datascience/v1/search/workspaces',
-				data
-			);
+			const response = await handleRequest('POST', '/api/datascience/v1/search/workspaces', data);
 
 			if (response.workspaces && response.workspaces.length > 0) {
 				// Extract ids and append to list
@@ -1738,22 +1909,131 @@ async function transferJupyterWorkspaces(userId, newOwnerId, filteredIds = []) {
 			const url = `/api/datascience/v1/workspaces/${jupyterWorkspaceIds[i]}/ownership`;
 			await handleRequest('PUT', url, { newOwnerId });
 		}
-		await logTransfers(
-			userId,
-			newOwnerId,
-			'DATA_SCIENCE_NOTEBOOK',
-			jupyterWorkspaceIds
-		);
+		await logTransfers(userId, newOwnerId, 'DATA_SCIENCE_NOTEBOOK', jupyterWorkspaceIds);
+	}
+}
+
+//---------------------------------Workspaces---------------------//
+// Per-workspace three-step flow:
+//   1. GET members for the workspace.
+//   2. If the new owner is already a member, promote their role to OWNER;
+//      otherwise add them as an OWNER member. (A bare add for an existing
+//      member returns 200 without promoting, so the branch must be explicit.)
+//   3. If the departing user is a direct member, remove that membership.
+
+/**
+ * Transfer ownership of Workspaces from a user to a new owner. For each Workspace
+ * the new owner is promoted to (or added as) an OWNER member and the departing
+ * user's membership is removed. When filteredIds is provided only those
+ * Workspaces are transferred; otherwise every Workspace owned by the user is
+ * discovered and transferred.
+ * @summary Transfer Workspaces
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Workspace IDs to transfer; empty transfers all owned by the user
+ */
+async function transferWorkspaces(userId, newOwnerId, filteredIds = []) {
+	let workspaceIds = [];
+
+	if (filteredIds.length > 0) {
+		// Use the provided filtered list
+		workspaceIds = filteredIds;
+	} else {
+		// Use existing discovery logic
+		const count = 100;
+		let offset = 0;
+		let moreData = true;
+
+		while (moreData) {
+			const data = {
+				combineResults: false,
+				count: count,
+				entityList: [['workspace']],
+				facetValuesToInclude: [],
+				filters: [
+					{
+						field: 'owned_by_id',
+						filterType: 'term',
+						name: 'Owned by',
+						not: false,
+						value: userId
+					}
+				],
+				hideSearchObjects: true,
+				offset: offset,
+				query: '**',
+				queryProfile: 'GLOBAL'
+			};
+
+			const response = await handleRequest('POST', '/api/search/v1/query', data);
+
+			const workspaces = response.searchResultsMap && response.searchResultsMap.workspace;
+			if (workspaces && workspaces.length > 0) {
+				// Extract ids and append to list
+				const ids = workspaces.map((w) => String(w.databaseId ?? w.id));
+				workspaceIds.push(...ids);
+
+				// Increment offset to get next page
+				offset += count;
+
+				// If less than pageSize returned, this is the last page
+				if (workspaces.length < count) {
+					moreData = false;
+				}
+			} else {
+				// No more data returned, stop loop
+				moreData = false;
+			}
+		}
+	}
+
+	if (workspaceIds.length > 0) {
+		const transferred = [];
+
+		for (const id of workspaceIds) {
+			const raw = await handleRequest('GET', `/api/nav/v1/workspaces/${id}/members`);
+			const members = Array.isArray(raw) ? raw : (raw && raw.members) || [];
+
+			const destMember = members.find((m) => m.memberType === 'USER' && m.memberId == newOwnerId);
+			const sourceMember = members.find((m) => m.memberType === 'USER' && m.memberId == userId);
+
+			// Promote or add the new owner
+			if (destMember) {
+				await handleRequest('PUT', `/api/nav/v1/workspaces/${id}/members/${destMember.id}`, {
+					...destMember,
+					memberRole: 'OWNER'
+				});
+			} else {
+				await handleRequest('POST', `/api/nav/v1/workspaces/${id}/members/${newOwnerId}`, {
+					members: [{ memberId: newOwnerId, memberRole: 'OWNER', memberType: 'USER' }],
+					sendEmail: false
+				});
+			}
+
+			// Remove the departing user's membership
+			if (sourceMember) {
+				await handleRequest('DELETE', `/api/nav/v1/workspaces/${id}/members/${sourceMember.id}`);
+			}
+
+			transferred.push(id);
+		}
+
+		await logTransfers(userId, newOwnerId, 'WORKSPACE', transferred);
 	}
 }
 
 //------------------------------Code Engine Packages--------------------------//
 
-async function transferCodeEnginePackages(
-	userId,
-	newOwnerId,
-	filteredIds = []
-) {
+/**
+ * Transfer ownership of Code Engine packages from a user to a new owner. When
+ * filteredIds is provided only those packages are transferred; otherwise every
+ * package owned by the user is discovered and transferred.
+ * @summary Transfer Code Engine Packages
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific package IDs to transfer; empty transfers all owned by the user
+ */
+async function transferCodeEnginePackages(userId, newOwnerId, filteredIds = []) {
 	let codeEnginePackageIds = [];
 
 	if (filteredIds.length > 0) {
@@ -1782,20 +2062,11 @@ async function transferCodeEnginePackages(
 				facetValuesToInclude: []
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/search/v1/query',
-				data
-			);
+			const response = await handleRequest('POST', '/api/search/v1/query', data);
 
-			if (
-				response.searchResultsMap.package &&
-				response.searchResultsMap.package.length > 0
-			) {
+			if (response.searchResultsMap.package && response.searchResultsMap.package.length > 0) {
 				// Extract ids and append to list
-				const ids = response.searchResultsMap.package.map(
-					(codeEngine) => codeEngine.uuid
-				);
+				const ids = response.searchResultsMap.package.map((codeEngine) => codeEngine.uuid);
 				codeEnginePackageIds.push(...ids);
 
 				// Increment offset to get next page
@@ -1817,17 +2088,21 @@ async function transferCodeEnginePackages(
 			const url = `/api/codeengine/v2/packages/${codeEnginePackageIds[i]}`;
 			await handleRequest('PUT', url, { owner: parseInt(newOwnerId) });
 		}
-		await logTransfers(
-			userId,
-			newOwnerId,
-			'CODEENGINE_PACKAGE',
-			codeEnginePackageIds
-		);
+		await logTransfers(userId, newOwnerId, 'CODEENGINE_PACKAGE', codeEnginePackageIds);
 	}
 }
 
 //---------------------------------------FileSets--------------------------------------------//
 
+/**
+ * Transfer ownership of FileSets from a user to a new owner. When filteredIds is
+ * provided only those FileSets are transferred; otherwise every FileSet owned by
+ * the user is discovered and transferred.
+ * @summary Transfer FileSets
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific FileSet IDs to transfer; empty transfers all owned by the user
+ */
 async function transferFilesets(userId, newOwnerId, filteredIds = []) {
 	let filesetIds = [];
 
@@ -1895,6 +2170,14 @@ async function transferFilesets(userId, newOwnerId, filteredIds = []) {
 // Limitation the new owner must be an owner of all the content
 // Just get a list of publications for the manager to review
 
+/**
+ * Find Domo Everywhere Publications owned by a user and log them for manual review.
+ * Publications cannot be reassigned automatically, so they are logged as not
+ * transferred rather than transferred.
+ * @summary Get Publications
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the intended new owner
+ */
 async function getPublications(userId, newOwnerId) {
 	let publications = [];
 	const url = '/api/publish/v2/publications';
@@ -1923,6 +2206,15 @@ async function getPublications(userId, newOwnerId) {
 
 //-------------------------------------Domo Everywhere Subscriptions-----------------------------------------//
 
+/**
+ * Transfer ownership of Domo Everywhere Subscriptions from a user to a new owner.
+ * When filteredIds is provided only those subscriptions are transferred; otherwise
+ * every subscription owned by the user is discovered and transferred.
+ * @summary Transfer Subscriptions
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific subscription IDs to transfer; empty transfers all owned by the user
+ */
 async function transferSubscriptions(userId, newOwnerId, filteredIds = []) {
 	let subscriptionIds = [];
 
@@ -1947,10 +2239,7 @@ async function transferSubscriptions(userId, newOwnerId, filteredIds = []) {
 					subscriptionIds.push(subscription.subscription.id);
 				}
 			} catch (error) {
-				console.error(
-					`Failed to transfer subscription ${subscriptionId}:`,
-					error
-				);
+				console.error(`Failed to transfer subscription ${subscriptionId}:`, error);
 			}
 		}
 	} else {
@@ -2006,6 +2295,15 @@ async function transferSubscriptions(userId, newOwnerId, filteredIds = []) {
 
 //--------------------------------------------------Sandbox Repositories---------------------------------//
 
+/**
+ * Transfer ownership of Sandbox Repositories from a user to a new owner. When
+ * filteredIds is provided only those repositories are transferred; otherwise every
+ * repository owned by the user is discovered and transferred.
+ * @summary Transfer Repositories
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific repository IDs to transfer; empty transfers all owned by the user
+ */
 async function transferRepositories(userId, newOwnerId, filteredIds = []) {
 	let repositoryIds = [];
 
@@ -2031,11 +2329,7 @@ async function transferRepositories(userId, newOwnerId, filteredIds = []) {
 				}
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/version/v1/repositories/search',
-				data
-			);
+			const response = await handleRequest('POST', '/api/version/v1/repositories/search', data);
 
 			if (response.repositories && response.repositories.length > 0) {
 				// Extract ids and append to list
@@ -2081,6 +2375,13 @@ async function transferRepositories(userId, newOwnerId, filteredIds = []) {
 
 //-----------------------------------------Approvals--------------------------------------//
 
+/**
+ * Transfer pending Approvals from a user to a new owner by replacing the user as
+ * the pending approver. Sent-back approvals are logged as not transferred.
+ * @summary Transfer Approvals
+ * @param {number} userId - The Domo user ID of the current (departing) approver
+ * @param {number} newOwnerId - The Domo user ID of the new approver
+ */
 async function transferApprovals(userId, newOwnerId) {
 	// Use existing discovery logic
 	const url = '/api/synapse/approval/graphql';
@@ -2106,13 +2407,9 @@ async function transferApprovals(userId, newOwnerId) {
 	const response = await handleRequest('POST', url, data);
 	const responseApprovals = response.data.workflowSearch.edges;
 
-	const pendingApprovals = responseApprovals.filter(
-		(approval) => approval.node.approval.status === 'PENDING'
-	);
+	const pendingApprovals = responseApprovals.filter((approval) => approval.node.approval.status === 'PENDING');
 
-	const sentBackApprovals = responseApprovals.filter(
-		(approval) => approval.node.approval.status === 'SENTBACK'
-	);
+	const sentBackApprovals = responseApprovals.filter((approval) => approval.node.approval.status === 'SENTBACK');
 
 	for (let i = 0; i < pendingApprovals.length; i++) {
 		if (pendingApprovals[i].node.approval.status == 'PENDING') {
@@ -2162,6 +2459,13 @@ async function transferApprovals(userId, newOwnerId) {
 
 //-----------------------------------------Approval Templates--------------------------------------//
 
+/**
+ * Transfer ownership of Approval Templates from a user to a new owner, replacing
+ * the user as owner/approver/observer and removing deleted approvers and observers.
+ * @summary Transfer Approval Templates
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ */
 async function transferApprovalTemplates(userId, newOwnerId) {
 	// Use existing discovery logic
 	const url = '/api/synapse/approval/graphql';
@@ -2211,17 +2515,10 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 		}`
 	};
 
-	const searchTemplatesResponse = await handleRequest(
-		'POST',
-		url,
-		searchTemplatesBody
-	);
+	const searchTemplatesResponse = await handleRequest('POST', url, searchTemplatesBody);
 
 	if (searchTemplatesResponse.data.templateConnection.edges.length > 0) {
-		const approvalTemplateIds =
-			searchTemplatesResponse.data.templateConnection.edges.map(
-				(edge) => edge.node.id
-			);
+		const approvalTemplateIds = searchTemplatesResponse.data.templateConnection.edges.map((edge) => edge.node.id);
 
 		let getTemplateBody = {
 			operationName: 'getTemplateForEdit',
@@ -2235,11 +2532,7 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 		// For each template—get full details, update owner, approvers, and observers—then save
 		for (let i = 0; i < approvalTemplateIds.length; i++) {
 			getTemplateBody.variables.id = approvalTemplateIds[i];
-			const getTemplateResponse = await handleRequest(
-				'POST',
-				url,
-				getTemplateBody
-			);
+			const getTemplateResponse = await handleRequest('POST', url, getTemplateBody);
 			const rawTemplate = getTemplateResponse.data.template;
 
 			// Remove approvers that are no longer active (isDeleted is nested differently per type)
@@ -2265,9 +2558,7 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 
 			// Remove duplicate approvers based on approverId, in case the new owner was already an approver
 			approvers = approvers.filter(
-				(value, index, self) =>
-					!value.approverId ||
-					index === self.findIndex((a) => a.approverId === value.approverId)
+				(value, index, self) => !value.approverId || index === self.findIndex((a) => a.approverId === value.approverId)
 			);
 
 			// Approvers cannot be empty—if all were removed, add the new owner as the approver
@@ -2280,22 +2571,14 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 			let observers = (rawTemplate.observers || []).map((observer) => ({
 				id: observer.id == userId ? newOwnerId : observer.id,
 				type: observer.type,
-				...(observer.type === 'Group' &&
-					observer.userCount !== undefined && { userCount: observer.userCount })
+				...(observer.type === 'Group' && observer.userCount !== undefined && { userCount: observer.userCount })
 			}));
 
 			// Remove duplicate observers based on id, in case the new owner was already an observer
-			observers = observers.filter(
-				(value, index, self) =>
-					index === self.findIndex((o) => o.id === value.id)
-			);
+			observers = observers.filter((value, index, self) => index === self.findIndex((o) => o.id === value.id));
 
 			// Remove observers that are no longer active (check against raw data before we stripped fields)
-			const deletedObserverIds = new Set(
-				(rawTemplate.observers || [])
-					.filter((o) => o.isDeleted)
-					.map((o) => o.id)
-			);
+			const deletedObserverIds = new Set((rawTemplate.observers || []).filter((o) => o.isDeleted).map((o) => o.id));
 			observers = observers.filter((o) => !deletedObserverIds.has(o.id));
 
 			// Build a clean template input with only the fields TemplateInput expects
@@ -2351,9 +2634,7 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 				};
 				if (rawTemplate.workflowIntegration.parameterMapping) {
 					cleanTemplate.workflowIntegration.parameterMapping = {
-						fields: (
-							rawTemplate.workflowIntegration.parameterMapping.fields || []
-						).map((f) => ({
+						fields: (rawTemplate.workflowIntegration.parameterMapping.fields || []).map((f) => ({
 							field: f.field,
 							parameter: f.parameter,
 							required: f.required,
@@ -2379,6 +2660,15 @@ async function transferApprovalTemplates(userId, newOwnerId) {
 
 //--------------------------------Custom Apps (Bricks and Pro Code Apps)-------------------------------------//
 
+/**
+ * Transfer ownership of Custom Apps (Bricks and Pro-Code apps) from a user to a new
+ * owner. When filteredIds is provided only those apps are transferred; otherwise
+ * every app owned by the user is discovered and transferred.
+ * @summary Transfer Custom Apps
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific app IDs to transfer; empty transfers all owned by the user
+ */
 async function transferCustomApps(userId, newOwnerId, filteredIds = []) {
 	let allAppIds = [];
 	let bricks = [];
@@ -2390,23 +2680,11 @@ async function transferCustomApps(userId, newOwnerId, filteredIds = []) {
 
 		// We need to check each app to categorize it properly
 		for (const appId of filteredIds) {
-			const response = await handleRequest(
-				'GET',
-				`/api/apps/v1/designs/${appId}?parts=versions`
-			);
+			const response = await handleRequest('GET', `/api/apps/v1/designs/${appId}?parts=versions`);
 
 			if (response && response.owner == userId) {
-				if (
-					response.versions &&
-					response.versions.length > 0 &&
-					Object.hasOwn(Object(response.versions[0]), 'flags')
-				) {
-					if (
-						Object.hasOwn(
-							Object(response.versions[0].flags),
-							'client-code-enabled'
-						)
-					) {
+				if (response.versions && response.versions.length > 0 && Object.hasOwn(Object(response.versions[0]), 'flags')) {
+					if (Object.hasOwn(Object(response.versions[0].flags), 'client-code-enabled')) {
 						if (response.versions[0].flags['client-code-enabled']) {
 							bricks.push(appId);
 						} else {
@@ -2442,12 +2720,7 @@ async function transferCustomApps(userId, newOwnerId, filteredIds = []) {
 							response[i].versions.length > 0 &&
 							Object.hasOwn(Object(response[i].versions[0]), 'flags')
 						) {
-							if (
-								Object.hasOwn(
-									Object(response[i].versions[0].flags),
-									'client-code-enabled'
-								)
-							) {
+							if (Object.hasOwn(Object(response[i].versions[0].flags), 'client-code-enabled')) {
 								if (response[i].versions[0].flags['client-code-enabled']) {
 									bricks.push(response[i].id);
 								} else {
@@ -2487,6 +2760,15 @@ async function transferCustomApps(userId, newOwnerId, filteredIds = []) {
 
 //-------------------------------------AI Models--------------------------------//
 
+/**
+ * Transfer ownership of AI Models from a user to a new owner. When filteredIds is
+ * provided only those models are transferred; otherwise every model owned by the
+ * user is discovered and transferred.
+ * @summary Transfer AI Models
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific model IDs to transfer; empty transfers all owned by the user
+ */
 async function transferAiModels(userId, newOwnerId, filteredIds = []) {
 	let models = [];
 
@@ -2513,11 +2795,7 @@ async function transferAiModels(userId, newOwnerId, filteredIds = []) {
 				sortMetricMap: {}
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/datascience/ml/v1/search/models',
-				data
-			);
+			const response = await handleRequest('POST', '/api/datascience/ml/v1/search/models', data);
 
 			if (response && response.models.length > 0) {
 				// Extract ids and append to list
@@ -2548,6 +2826,15 @@ async function transferAiModels(userId, newOwnerId, filteredIds = []) {
 
 //-----------------------------------AI Projects----------------------------------//
 
+/**
+ * Transfer ownership of AI Projects from a user to a new owner. When filteredIds is
+ * provided only those projects are transferred; otherwise every project owned by
+ * the user is discovered and transferred.
+ * @summary Transfer AI Projects
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific project IDs to transfer; empty transfers all owned by the user
+ */
 async function transferAiProjects(userId, newOwnerId, filteredIds = []) {
 	let projects = [];
 
@@ -2574,11 +2861,7 @@ async function transferAiProjects(userId, newOwnerId, filteredIds = []) {
 				sortMetricMap: {}
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/datascience/ml/v1/search/projects',
-				data
-			);
+			const response = await handleRequest('POST', '/api/datascience/ml/v1/search/projects', data);
 
 			if (response && response.projects.length > 0) {
 				// Extract ids and append to list
@@ -2609,6 +2892,15 @@ async function transferAiProjects(userId, newOwnerId, filteredIds = []) {
 
 //--------------------------ProjectsAndTasks--------------------------//
 
+/**
+ * Transfer ownership of Projects and their Tasks from a user to a new owner. When
+ * filteredIds is provided only those Projects/Tasks are transferred; otherwise the
+ * user's Projects and assigned Tasks are discovered and transferred.
+ * @summary Transfer Projects and Tasks
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Project/Task IDs to transfer; empty transfers all owned by the user
+ */
 async function transferProjectsAndTasks(userId, newOwnerId, filteredIds = []) {
 	let allIds = [];
 	let projects = [];
@@ -2621,20 +2913,14 @@ async function transferProjectsAndTasks(userId, newOwnerId, filteredIds = []) {
 		for (const id of filteredIds) {
 			try {
 				// Try to get as project first
-				const project = await handleRequest(
-					'GET',
-					`/api/content/v1/projects/${id}`
-				);
+				const project = await handleRequest('GET', `/api/content/v1/projects/${id}`);
 				if (project && project.assignedTo == userId) {
 					projects.push(project);
 				}
 			} catch (error) {
 				// If not a project, might be a task
 				try {
-					const task = await handleRequest(
-						'GET',
-						`/api/content/v1/tasks/${id}`
-					);
+					const task = await handleRequest('GET', `/api/content/v1/tasks/${id}`);
 					if (task) {
 						tasks.push(task);
 					}
@@ -2722,6 +3008,15 @@ async function transferProjectsAndTasks(userId, newOwnerId, filteredIds = []) {
 	}
 }
 
+/**
+ * Transfer ownership of Metrics (Automated Insights) from a user to a new owner.
+ * When filteredIds is provided only those Metrics are transferred; otherwise every
+ * Metric owned by the user is discovered and transferred.
+ * @summary Transfer Metrics
+ * @param {number} userId - The Domo user ID of the current (departing) owner
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [filteredIds=[]] - Specific Metric IDs to transfer; empty transfers all owned by the user
+ */
 async function transferMetrics(userId, newOwnerId, filteredIds = []) {
 	let metrics = [];
 
@@ -2729,10 +3024,7 @@ async function transferMetrics(userId, newOwnerId, filteredIds = []) {
 		// Use the provided filtered list
 		for (const metricId of filteredIds) {
 			try {
-				await handleRequest(
-					'POST',
-					`/api/content/v1/metrics/${metricId}/owner/${newOwnerId}`
-				);
+				await handleRequest('POST', `/api/content/v1/metrics/${metricId}/owner/${newOwnerId}`);
 				metrics.push(metricId);
 			} catch (error) {
 				console.error(`Failed to transfer metric ${metricId}:`, error);
@@ -2757,19 +3049,12 @@ async function transferMetrics(userId, newOwnerId, filteredIds = []) {
 				offset: offset
 			};
 
-			const response = await handleRequest(
-				'POST',
-				'/api/content/v1/metrics/filter',
-				data
-			);
+			const response = await handleRequest('POST', '/api/content/v1/metrics/filter', data);
 
 			if (response && response.metrics.length > 0) {
 				// Process metrics
 				for (const metric of response.metrics) {
-					await handleRequest(
-						'POST',
-						`/api/content/v1/metrics/${metric.id}/owner/${newOwnerId}`
-					);
+					await handleRequest('POST', `/api/content/v1/metrics/${metric.id}/owner/${newOwnerId}`);
 					metrics.push(metric.id);
 				}
 

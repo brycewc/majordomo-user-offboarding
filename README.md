@@ -123,6 +123,8 @@ The function currently supports the following Domo object types for ownership re
 - Task Center Queues
 - Task Center Tasks
 - Workflows
+- Worksheets
+- Workspaces
 
 ## Unsupported Object Types
 
