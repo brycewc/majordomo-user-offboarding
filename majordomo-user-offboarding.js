@@ -454,6 +454,163 @@ async function transferDataflows(userId, newOwnerId, filteredIds = []) {
 			};
 			await handleRequest('PUT', '/api/dataprocessing/v1/dataflows/bulk/tag', addTagsBody);
 		}
+
+		// Make the new owner functional: ensure they can read every input DataSet
+		// feeding the transferred DataFlows, sharing any they can't already reach.
+		await grantNewOwnerInputDatasetAccess(userId, newOwnerId, allIds);
+	}
+}
+
+/**
+ * Ensure the new owner can read every input DataSet feeding the transferred
+ * DataFlows. For each input DataSet the new owner can't already reach (directly
+ * or through one of their groups) a direct CAN_VIEW share is granted, which is
+ * the minimum needed for the owner to read inputs and run the flow. Input
+ * DataSet IDs are deduplicated across every DataFlow so the owner's groups and
+ * each DataSet's permissions are fetched once rather than per DataFlow.
+ * @summary Grant New Owner Input Dataset Access
+ * @param {number} userId - The Domo user ID of the departing owner (used for logging)
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [dataflowIds=[]] - The IDs of the transferred DataFlows whose inputs to check
+ */
+async function grantNewOwnerInputDatasetAccess(userId, newOwnerId, dataflowIds = []) {
+	if (!dataflowIds || dataflowIds.length === 0) {
+		return;
+	}
+
+	// Step 1: collect the unique set of input DataSet IDs across every DataFlow.
+	const inputDatasetIds = new Set();
+	for (const dataflowId of dataflowIds) {
+		const dataflow = await handleRequest('GET', `/api/dataprocessing/v1/dataflows/${dataflowId}`);
+		if (dataflow && Array.isArray(dataflow.inputs)) {
+			for (const input of dataflow.inputs) {
+				if (input && input.dataSourceId) {
+					inputDatasetIds.add(input.dataSourceId);
+				}
+			}
+		}
+	}
+	if (inputDatasetIds.size === 0) {
+		return;
+	}
+	const datasetIds = [...inputDatasetIds];
+
+	// Step 2: fetch the new owner's group IDs once and build a Set of string IDs.
+	const userGroupIds = new Set();
+	const groups = await handleRequest('GET', `/api/content/v2/users/${newOwnerId}/groups`);
+	if (Array.isArray(groups)) {
+		for (const group of groups) {
+			if (group && group.id != null) {
+				userGroupIds.add(String(group.id));
+			}
+		}
+	}
+
+	// Step 3: fetch the grant rows for the input DataSets. Prefer the single bulk
+	// call; fall back to one call per DataSet since the bulk endpoint can be
+	// permission-gated and return 403 even when the caller owns the DataSets.
+	const grantsByDataset = new Map();
+	let bulkPermissions = null;
+	try {
+		bulkPermissions = await handleRequest(
+			'POST',
+			'/api/data/v3/datasources/bulk/permissions',
+			datasetIds,
+			null,
+			'application/json',
+			true
+		);
+	} catch (error) {
+		bulkPermissions = null; // Fall back to per-DataSet permission lookups below.
+	}
+
+	if (bulkPermissions && typeof bulkPermissions === 'object') {
+		for (const datasetId of datasetIds) {
+			const entry = bulkPermissions[datasetId];
+			// Normalize to a grant-row array regardless of the bulk value shape.
+			const grants = Array.isArray(entry) ? entry : entry && Array.isArray(entry.list) ? entry.list : [];
+			grantsByDataset.set(datasetId, grants);
+		}
+	} else {
+		for (const datasetId of datasetIds) {
+			const response = await handleRequest('GET', `/api/data/v3/datasources/${datasetId}/permissions`);
+			const grants = response && Array.isArray(response.list) ? response.list : [];
+			grantsByDataset.set(datasetId, grants);
+		}
+	}
+
+	// Step 4: decide, per DataSet, whether the new owner already has access either
+	// directly (USER row) or through one of their groups (GROUP row).
+	const newOwnerIdStr = String(newOwnerId);
+	const datasetsToShare = [];
+	for (const datasetId of datasetIds) {
+		const grants = grantsByDataset.get(datasetId) || [];
+		const hasAccess = grants.some((grant) => {
+			if (!grant) return false;
+			if (grant.type === 'USER') return String(grant.id) === newOwnerIdStr;
+			if (grant.type === 'GROUP') return userGroupIds.has(String(grant.id));
+			return false;
+		});
+		if (!hasAccess) {
+			datasetsToShare.push(datasetId);
+		}
+	}
+	if (datasetsToShare.length === 0) {
+		return;
+	}
+
+	// Step 5: grant a direct CAN_VIEW share for the DataSets the new owner can't
+	// reach, batching ~50 DataSet IDs per call. Every batched ID not present in
+	// the response's `failed` map is treated as successfully shared.
+	const sharedDatasetIds = [];
+	const failedDatasetIds = [];
+	for (let i = 0; i < datasetsToShare.length; i += 50) {
+		const chunk = datasetsToShare.slice(i, i + 50);
+		const body = {
+			bulkItems: { ids: chunk, type: 'DATA_SOURCE' },
+			dataSourceShareEntity: {
+				permissions: [{ accessLevel: 'CAN_VIEW', id: newOwnerIdStr, type: 'USER' }],
+				sendEmail: false,
+				message: 'Granting new dataflow owner access to input dataset.'
+			}
+		};
+		const response = await handleRequest('POST', '/api/data/v1/ui/bulk/share', body);
+
+		if (response === undefined || response === null) {
+			// The whole batch failed (error swallowed by handleRequest).
+			failedDatasetIds.push(...chunk);
+			continue;
+		}
+
+		const failed = response.failed && typeof response.failed === 'object' ? response.failed : {};
+		for (const id of chunk) {
+			if (Object.prototype.hasOwnProperty.call(failed, id)) {
+				failedDatasetIds.push(id);
+			} else {
+				sharedDatasetIds.push(id);
+			}
+		}
+	}
+
+	if (sharedDatasetIds.length > 0) {
+		await logTransfers(
+			userId,
+			newOwnerId,
+			'DATA_SOURCE',
+			sharedDatasetIds,
+			'SHARED',
+			'Granted new dataflow owner CAN_VIEW on input dataset'
+		);
+	}
+	if (failedDatasetIds.length > 0) {
+		await logTransfers(
+			userId,
+			newOwnerId,
+			'DATA_SOURCE',
+			failedDatasetIds,
+			'FAILED',
+			'Failed to share dataflow input dataset with new dataflow owner'
+		);
 	}
 }
 
