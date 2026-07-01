@@ -198,7 +198,7 @@ async function logTransfers(userId, newOwnerId, type, ids, status = 'TRANSFERRED
  * @summary Transfer Content
  * @param {number} userId - The Domo user ID of the departing owner
  * @param {number} newOwnerId - The Domo user ID of the new owner
- * @param {object} [objectsToTransfer=[]] - Specific objects to transfer as { type, id } entries; empty transfers everything
+ * @param {object[]} [objectsToTransfer=[]] - Specific objects to transfer as { type, id } entries; empty transfers everything
  */
 async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 	let currentPeriodId = await getCurrentPeriod();
@@ -1543,11 +1543,16 @@ async function transferAppDbCollections(userId, newOwnerId, filteredIds = []) {
  */
 function isNotFoundError(error) {
 	if (!error) return false;
-	const status =
-		error.status ??
-		error.statusCode ??
-		error.code ??
-		(error.response && (error.response.status ?? error.response.statusCode));
+	let status;
+	if (error.status != null) {
+		status = error.status;
+	} else if (error.statusCode != null) {
+		status = error.statusCode;
+	} else if (error.code != null) {
+		status = error.code;
+	} else if (error.response) {
+		status = error.response.status != null ? error.response.status : error.response.statusCode;
+	}
 	if (status === 404 || status === '404') return true;
 	try {
 		const text = typeof error === 'string' ? error : error.message || JSON.stringify(error);
@@ -2127,7 +2132,7 @@ async function transferWorkspaces(userId, newOwnerId, filteredIds = []) {
 			const workspaces = response.searchResultsMap && response.searchResultsMap.workspace;
 			if (workspaces && workspaces.length > 0) {
 				// Extract ids and append to list
-				const ids = workspaces.map((w) => String(w.databaseId ?? w.id));
+				const ids = workspaces.map((w) => String(w.databaseId != null ? w.databaseId : w.id));
 				workspaceIds.push(...ids);
 
 				// Increment offset to get next page
