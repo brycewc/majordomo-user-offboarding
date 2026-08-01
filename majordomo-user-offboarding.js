@@ -709,7 +709,10 @@ async function transferCards(userId, newOwnerId, filteredIds = []) {
 /**
  * Transfer ownership of Alerts from a user to a new owner. When filteredIds is
  * provided only those Alerts are transferred; otherwise every Alert owned by the
- * user is discovered and transferred.
+ * user is discovered and transferred. If the departing owner was also subscribed
+ * to an Alert, the new owner is subscribed to it as well so notifications keep
+ * flowing; Alerts the departing owner owned but was not subscribed to leave the
+ * new owner unsubscribed.
  * @summary Transfer Alerts
  * @param {number} userId - The Domo user ID of the current (departing) owner
  * @param {number} newOwnerId - The Domo user ID of the new owner
@@ -753,16 +756,95 @@ async function transferAlerts(userId, newOwnerId, filteredIds = []) {
 	}
 
 	if (alerts.length > 0) {
+		const subscribedAlerts = [];
+		const failedSubscriptionAlerts = [];
+
 		for (let i = 0; i < alerts.length; i++) {
+			const alertId = alerts[i];
+
+			// Read the subscriber list before changing the owner so the departing
+			// owner's own subscription is still visible.
+			let departingOwnerSubscribed = false;
+			let newOwnerSubscribed = false;
+			try {
+				const subscriptions = await handleRequest(
+					'GET',
+					`/api/social/v4/alerts/${alertId}/subscriptions`,
+					null,
+					null,
+					'application/json',
+					true
+				);
+				const subscriptionList = Array.isArray(subscriptions) ? subscriptions : [];
+				// subscriberId comes back as a string, so compare loosely against the numeric IDs
+				departingOwnerSubscribed = subscriptionList.some(
+					(subscription) => subscription.type === 'USER' && subscription.subscriberId == userId
+				);
+				newOwnerSubscribed = subscriptionList.some(
+					(subscription) => subscription.type === 'USER' && subscription.subscriberId == newOwnerId
+				);
+			} catch (error) {
+				// Don't let a subscription lookup failure block the ownership transfer
+				console.error(`Failed to get subscriptions for alert ${alertId}:`, error);
+				failedSubscriptionAlerts.push(alertId);
+			}
+
 			const body = {
-				id: alerts[i],
+				id: alertId,
 				owner: newOwnerId
 			};
-			const url = `/api/social/v4/alerts/${alerts[i]}`;
+			const url = `/api/social/v4/alerts/${alertId}`;
 			await handleRequest('PATCH', url, body);
+
+			if (departingOwnerSubscribed && !newOwnerSubscribed) {
+				try {
+					await handleRequest(
+						'POST',
+						`/api/social/v4/alerts/${alertId}/share`,
+						{
+							alertSubscriptions: [
+								{
+									subscriberId: newOwnerId,
+									type: 'USER'
+								}
+							],
+							sendEmail: false
+						},
+						null,
+						'application/json',
+						true
+					);
+					subscribedAlerts.push(alertId);
+				} catch (error) {
+					// The alert is already transferred, so only the subscription is lost
+					console.error(`Failed to subscribe new owner to alert ${alertId}:`, error);
+					failedSubscriptionAlerts.push(alertId);
+				}
+			}
 		}
 
 		await logTransfers(userId, newOwnerId, 'ALERT', alerts);
+
+		if (subscribedAlerts.length > 0) {
+			await logTransfers(
+				userId,
+				newOwnerId,
+				'ALERT',
+				subscribedAlerts,
+				'SHARED',
+				'Subscribed new alert owner because previous owner was subscribed'
+			);
+		}
+		if (failedSubscriptionAlerts.length > 0) {
+			await logTransfers(
+				userId,
+				newOwnerId,
+				'ALERT',
+				failedSubscriptionAlerts,
+				'FAILED',
+				'Failed to copy previous alert owner subscription to new owner'
+			);
+		}
 	}
 }
 
