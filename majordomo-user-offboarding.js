@@ -386,22 +386,15 @@ async function getUserGroupIds(userId) {
  * @param {text[]} [datasetIds=[]] - The IDs of the transferred DataSets whose accounts to check
  */
 async function grantNewOwnerDatasetAccountAccess(userId, newOwnerId, datasetIds = []) {
-	if (!datasetIds || datasetIds.length === 0) {
-		return;
-	}
-
 	const accountIds = new Set();
-	for (const datasetId of datasetIds) {
+	for (const datasetId of datasetIds || []) {
 		const dataset = await handleRequest('GET', `/api/data/v3/datasources/${datasetId}`);
 		if (dataset && dataset.accountId) {
 			accountIds.add(dataset.accountId);
 		}
 	}
-	if (accountIds.size === 0) {
-		return;
-	}
 
-	const userGroupIds = await getUserGroupIds(newOwnerId);
+	const userGroupIds = accountIds.size > 0 ? await getUserGroupIds(newOwnerId) : new Set();
 	const newOwnerIdStr = String(newOwnerId);
 	const sharedAccountIds = [];
 	const failedAccountIds = [];
