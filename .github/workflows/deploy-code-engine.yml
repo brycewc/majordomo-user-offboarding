@@ -7,7 +7,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "main.js"
+      - "majordomo-user-offboarding.js"
       - "domo-codeengine.json"
   # Lets you re-run the sync from the Actions tab without pushing a commit.
   workflow_dispatch:
