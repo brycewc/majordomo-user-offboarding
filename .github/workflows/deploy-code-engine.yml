@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - id: sync
-        uses: brycewc/domo-codeengine-sync@v1
+        uses: brycewc/domo-codeengine-sync@main
         env:
           DOMO_DEVELOPER_TOKEN: ${{ secrets.DOMO_DEVELOPER_TOKEN }}
 
