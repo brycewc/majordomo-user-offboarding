@@ -384,6 +384,9 @@ async function getUserGroupIds(userId) {
  * @param {number} userId - The Domo user ID of the departing owner (used for logging)
  * @param {number} newOwnerId - The Domo user ID of the new owner
  * @param {text[]} [datasetIds=[]] - The IDs of the transferred DataSets whose accounts to check
+ * @returns {object} result - The accounts this call shared or failed to share
+ * @returns {number[]} result.sharedAccountIds - Accounts newly shared with the new owner
+ * @returns {number[]} result.failedAccountIds - Accounts whose access lookup or share failed
  */
 async function grantNewOwnerDatasetAccountAccess(userId, newOwnerId, datasetIds = []) {
 	const accountIds = new Set();
@@ -452,6 +455,8 @@ async function grantNewOwnerDatasetAccountAccess(userId, newOwnerId, datasetIds 
 			'Failed to share account powering dataset with new dataset owner'
 		);
 	}
+
+	return { sharedAccountIds, failedAccountIds };
 }
 
 //----------------------------DataFlows-----------------------//
