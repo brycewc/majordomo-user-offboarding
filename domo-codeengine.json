@@ -1,0 +1,10 @@
+{
+  "instance": "domo",
+  "packages": [
+    {
+      "packageId": "d5c46aaa-963f-4e01-a84a-f89ccea6465a",
+      "sourcePath": "majordomo-user-offboarding.js",
+      "release": false
+    }
+  ]
+}

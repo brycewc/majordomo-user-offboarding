@@ -220,7 +220,10 @@ async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 	}
 
 	await Promise.all([
-		transferDatasets(userId, newOwnerId, objectsByType['DATA_SOURCE'] || []),
+		// Accounts first so the DataSet step's CAN_VIEW account share can't overwrite the OWNER grant
+		transferAccounts(userId, newOwnerId, objectsByType['ACCOUNT'] || []).then(() =>
+			transferDatasets(userId, newOwnerId, objectsByType['DATA_SOURCE'] || [])
+		),
 
 		transferDataflows(userId, newOwnerId, objectsByType['DATAFLOW_TYPE'] || []),
 
@@ -250,8 +253,6 @@ async function transferContent(userId, newOwnerId, objectsToTransfer = []) {
 			...(objectsByType['BEAST_MODE_FORMULA'] || []),
 			...(objectsByType['VARIABLE'] || [])
 		]),
-
-		transferAccounts(userId, newOwnerId, objectsByType['ACCOUNT'] || []),
 
 		transferJupyterWorkspaces(userId, newOwnerId, objectsByType['DATA_SCIENCE_NOTEBOOK'] || []),
 
@@ -349,6 +350,114 @@ async function transferDatasets(userId, newOwnerId, filteredIds = []) {
 		}
 
 		await logTransfers(userId, newOwnerId, 'DATA_SOURCE', allIds);
+
+		await grantNewOwnerDatasetAccountAccess(userId, newOwnerId, allIds);
+	}
+}
+
+/**
+ * Get the IDs of the groups a user belongs to.
+ * @summary Get User Group IDs
+ * @param {number} userId - The Domo user ID whose groups to fetch
+ * @returns {object} groupIds - A Set of the user's group IDs as strings
+ */
+async function getUserGroupIds(userId) {
+	const groupIds = new Set();
+	const groups = await handleRequest('GET', `/api/content/v2/users/${userId}/groups`);
+	if (Array.isArray(groups)) {
+		for (const group of groups) {
+			if (group && group.id != null) {
+				groupIds.add(String(group.id));
+			}
+		}
+	}
+	return groupIds;
+}
+
+/**
+ * Ensure the new owner can use every account powering the transferred DataSets,
+ * so connector DataSets keep running after the departing owner is deleted. For
+ * each account the new owner can't already reach (directly or through one of
+ * their groups) a direct CAN_VIEW share is granted. Account IDs are deduplicated
+ * so each account's access list is fetched once.
+ * @summary Grant New Owner Dataset Account Access
+ * @param {number} userId - The Domo user ID of the departing owner (used for logging)
+ * @param {number} newOwnerId - The Domo user ID of the new owner
+ * @param {text[]} [datasetIds=[]] - The IDs of the transferred DataSets whose accounts to check
+ */
+async function grantNewOwnerDatasetAccountAccess(userId, newOwnerId, datasetIds = []) {
+	if (!datasetIds || datasetIds.length === 0) {
+		return;
+	}
+
+	const accountIds = new Set();
+	for (const datasetId of datasetIds) {
+		const dataset = await handleRequest('GET', `/api/data/v3/datasources/${datasetId}`);
+		if (dataset && dataset.accountId) {
+			accountIds.add(dataset.accountId);
+		}
+	}
+	if (accountIds.size === 0) {
+		return;
+	}
+
+	const userGroupIds = await getUserGroupIds(newOwnerId);
+	const newOwnerIdStr = String(newOwnerId);
+	const sharedAccountIds = [];
+	const failedAccountIds = [];
+
+	for (const accountId of accountIds) {
+		const shareUrl = `/api/accounts/v2/accounts/share/${accountId}`;
+		const access = await handleRequest('GET', shareUrl);
+		if (!access || !Array.isArray(access.list)) {
+			failedAccountIds.push(accountId);
+			continue;
+		}
+
+		const hasAccess = access.list.some((grant) => {
+			if (!grant) return false;
+			if (grant.type === 'USER') return String(grant.id) === newOwnerIdStr;
+			if (grant.type === 'GROUP') return userGroupIds.has(String(grant.id));
+			return false;
+		});
+		if (hasAccess) {
+			continue;
+		}
+
+		try {
+			await handleRequest(
+				'PUT',
+				shareUrl,
+				{ type: 'USER', id: newOwnerId, accessLevel: 'CAN_VIEW' },
+				null,
+				'application/json',
+				true
+			);
+			sharedAccountIds.push(accountId);
+		} catch (error) {
+			failedAccountIds.push(accountId);
+		}
+	}
+
+	if (sharedAccountIds.length > 0) {
+		await logTransfers(
+			userId,
+			newOwnerId,
+			'ACCOUNT',
+			sharedAccountIds,
+			'SHARED',
+			'Granted new dataset owner CAN_VIEW on account powering dataset'
+		);
+	}
+	if (failedAccountIds.length > 0) {
+		await logTransfers(
+			userId,
+			newOwnerId,
+			'ACCOUNT',
+			failedAccountIds,
+			'FAILED',
+			'Failed to share account powering dataset with new dataset owner'
+		);
 	}
 }
 
@@ -495,16 +604,8 @@ async function grantNewOwnerInputDatasetAccess(userId, newOwnerId, dataflowIds =
 	}
 	const datasetIds = [...inputDatasetIds];
 
-	// Step 2: fetch the new owner's group IDs once and build a Set of string IDs.
-	const userGroupIds = new Set();
-	const groups = await handleRequest('GET', `/api/content/v2/users/${newOwnerId}/groups`);
-	if (Array.isArray(groups)) {
-		for (const group of groups) {
-			if (group && group.id != null) {
-				userGroupIds.add(String(group.id));
-			}
-		}
-	}
+	// Step 2: fetch the new owner's group IDs once.
+	const userGroupIds = await getUserGroupIds(newOwnerId);
 
 	// Step 3: fetch the grant rows for the input DataSets. Prefer the single bulk
 	// call; fall back to one call per DataSet since the bulk endpoint can be
@@ -2075,7 +2176,7 @@ async function transferAccounts(userId, newOwnerId, filteredIds = []) {
 
 	if (accountIds.length > 0) {
 		for (let i = 0; i < accountIds.length; i++) {
-			const transferUrl = `/api/data/v2/accounts/share/${accountIds[i]}`;
+			const transferUrl = `/api/accounts/v2/accounts/share/${accountIds[i]}`;
 			const addBody = { type: 'USER', id: newOwnerId, accessLevel: 'OWNER' };
 			await handleRequest('PUT', transferUrl, addBody);
 

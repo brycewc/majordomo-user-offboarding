@@ -1,0 +1,44 @@
+name: Sync Code Engine Package
+
+# Pushes to main that touch the package source (or its config) sync the Code
+# Engine definition in Domo from the JSDoc in main.js. instance, packageId, and
+# release live in domo-codeengine.json so this workflow stays boilerplate.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "main.js"
+      - "domo-codeengine.json"
+  # Lets you re-run the sync from the Actions tab without pushing a commit.
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: sync
+        uses: brycewc/domo-codeengine-sync@v1
+        env:
+          DOMO_DEVELOPER_TOKEN: ${{ secrets.DOMO_DEVELOPER_TOKEN }}
+
+      - name: Summarize
+        if: always() && steps.sync.outputs.results != ''
+        env:
+          RESULTS: ${{ steps.sync.outputs.results }}
+          VERSIONS: ${{ steps.sync.outputs.versions }}
+        run: |
+          {
+            echo '### Domo Code Engine sync'
+            echo ''
+            if [ -n "$VERSIONS" ]; then
+              echo "Synced: \`$VERSIONS\`"
+            else
+              echo 'Nothing to sync, the definition already matches the JSDoc.'
+            fi
+            echo ''
+            echo '```json'
+            echo "$RESULTS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
